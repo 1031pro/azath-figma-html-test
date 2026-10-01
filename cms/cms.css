@@ -18,3 +18,14 @@
 @media(max-width:1450px){#article-editor{display:block}.article-reader{position:relative;top:0;margin-top:20px}.article-form{max-width:none}#article-canvas{height:560px}}
 @media(max-width:760px){#article-canvas{height:550px}.article-reader-toolbar{gap:5px}.article-reader-toolbar select{max-width:110px}}
 .action-dialog .dialog-actions{margin-top:24px}
+/* ページ上で直接編集するための、コンパクトな補助パネル。 */
+.editor-grid{grid-template-columns:235px minmax(0,1fr)}
+.inspector-head{padding:20px 16px}.inspector-head p{font-size:11px;line-height:1.8}
+.editing-guide{padding:18px 16px;border-bottom:1px solid var(--line)}
+.editing-guide strong{font-size:12px;color:#3f7046}.editing-guide p{font-size:10px;color:var(--muted);margin-top:8px;line-height:1.9}
+.advanced-fields>summary{cursor:pointer;padding:16px;font-size:11px;font-weight:600;background:#f7faf3;border-bottom:1px solid var(--line)}
+.advanced-fields .field,.advanced-fields .faq-card{padding:15px 16px}
+#inline-mode-label{font-size:10px;color:#62805f}.preview-toolbar>span#inline-mode-label{margin-left:0}
+@media(min-width:1800px){.editor-grid{grid-template-columns:260px minmax(0,1fr)}}
+@media(max-width:1100px){.editor-grid{grid-template-columns:210px minmax(0,1fr)}#inline-mode-label{display:none}}
+@media(max-width:760px){.inspector{max-height:28vh}.editing-guide{display:none}.inspector-head{padding:12px 16px}.inspector-head p{margin-bottom:8px}.advanced-fields>summary{padding:10px 16px}.preview-panel{height:76vh}}

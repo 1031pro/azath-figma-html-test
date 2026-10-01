@@ -1,6 +1,28 @@
 "use strict";
 
 (() => {
+  const model = {
+    safeUrl(value, baseUrl) {
+      const text = String(value || "").trim();
+      if (!text) return "";
+      if (/[\u0000-\u001f\u007f]/.test(text)) throw new Error("リンクに制御文字は使えません。");
+      let url;
+      try { url = new URL(text, baseUrl); } catch { throw new Error("リンク先の形式を確認してください。"); }
+      if (!["http:", "https:", "mailto:", "tel:"].includes(url.protocol)) throw new Error("http・https・mailto・tel、またはページ内リンクを指定してください。");
+      return text;
+    },
+    completeContent(content, defaults) {
+      const result = structuredClone(content);
+      result.values = { ...defaults.values, ...result.values };
+      result.images = { ...structuredClone(defaults.images), ...result.images };
+      result.links = { ...structuredClone(defaults.links), ...result.links };
+      result.recruitButtons = content.recruitButtons === undefined
+        ? defaults.recruitButtons.map((item) => ({ ...item, label: result.values[item.key] ?? item.label }))
+        : structuredClone(content.recruitButtons);
+      return result;
+    },
+  };
+  if (typeof document === "undefined") { module.exports = model; return; }
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
   const clone = (value) => structuredClone(value);
@@ -8,7 +30,8 @@
   const siteBase = new URL("site/", location.href).href;
   const fields = [];
   const groups = [];
-  const initial = { values: {}, images: {}, faqs: [], articles: [] };
+  const initial = { values: {}, images: {}, links: {}, recruitButtons: [], faqs: [], articles: [] };
+  const buttons = [];
   let state;
   let db;
   let dirty = false;
@@ -23,6 +46,7 @@
   let articleRoute = "detail";
   let pageScroll = 0;
   let toastTimer;
+  let activeInline = null;
 
   // 元ページのスクリプトはプレビューで動かさず、編集対象を親画面で扱う。
   $$("script, dialog, .back-top", source).forEach((node) => node.remove());
@@ -36,10 +60,16 @@
   source.head.prepend(base);
   const previewStyle = source.createElement("style");
   previewStyle.textContent = `
-    [data-cms-key], [data-faq-id] { cursor:pointer; }
-    [data-cms-key]:hover, [data-faq-id]:hover { outline:2px dashed #498d65; outline-offset:3px; }
-    .cms-selected { outline:3px solid #46865b !important; outline-offset:4px; }
     html { scroll-behavior:auto !important; }
+    .hero-area h1 { height:auto;min-height:64px;white-space:normal;overflow-wrap:anywhere; }
+    .recruit-nav { display:grid;grid-template-columns:repeat(auto-fit,minmax(165px,1fr)); }
+    .recruit-nav a { white-space:normal;overflow-wrap:anywhere;min-width:0; }
+    .recruit-nav a:last-child { grid-column:auto; }
+    .site-nav a { border:0;background:transparent;padding:0;font-size:12px;white-space:nowrap; }
+    a[data-cms-original-tag="button"] { text-decoration:none;cursor:pointer; }
+    a.booking, a.mail { display:inline-block;text-align:center; }
+    a.phone, a.qr { display:block;text-align:center; }
+    @media(max-width:700px){.hero-area h1{min-height:0}.recruit-nav{grid-template-columns:repeat(2,minmax(0,1fr))}}
   `;
   source.head.append(previewStyle);
 
@@ -91,6 +121,13 @@
       group.fields.push(field);
       initial.images[key] = { src: field.src, alt: field.alt };
     });
+    $$("a,button", root).forEach((node, index) => {
+      const key = node.dataset.cmsKey || `${id}.button.${index}`;
+      node.dataset.cmsButton = key;
+      const link = { url: node.getAttribute("href") || "", target: node.getAttribute("target") === "_blank" ? "_blank" : "_self" };
+      initial.links[key] = link;
+      buttons.push({ key, group: id, field: fields.find((field) => field.key === key), label: plainText(node) || node.getAttribute("aria-label") || "画像のリンク" });
+    });
   }
 
   addGroup("header", "共通ヘッダー・ロゴ", $("header", source));
@@ -106,6 +143,10 @@
   footerWrap.append(footer);
   addGroup("footer", "共通フッター", footerWrap);
   footerWrap.replaceWith(footer);
+
+  $$(".recruit-nav a", source).forEach((node, index) => {
+    initial.recruitButtons.push({ id: `recruit-${index}`, key: node.dataset.cmsKey, label: plainText(node), url: node.getAttribute("href") || "", target: "_self" });
+  });
 
   let category = "見学・応募について";
   [...$("#faq", source).children].forEach((node, index) => {
@@ -204,6 +245,7 @@
 
   async function saveDraft() {
     if (busy) return;
+    commitInlineEditors();
     if (!db) return toast("ブラウザ保存を利用できません。編集データを書き出してください。");
     busy = true;
     status();
@@ -249,7 +291,54 @@
         setText(node, content.values[field.key] ?? field.value, field.ownText);
       }
     });
+    buttons.forEach((item) => {
+      const node = doc.querySelector(`[data-cms-button="${item.key}"]`);
+      if (node) applyLink(node, content.links?.[item.key] || initial.links[item.key]);
+    });
+    renderRecruitButtons(doc, content);
     renderFAQDocument(doc, content);
+  }
+
+  function applyLink(node, link) {
+    let url = "";
+    try { url = model.safeUrl(link?.url, siteBase); } catch { /* 保存済みの危険なリンクも無効にする。 */ }
+    const wasButton = node.tagName === "BUTTON" || node.dataset.cmsOriginalTag === "button";
+    if (wasButton && ((url && node.tagName === "BUTTON") || (!url && node.tagName === "A"))) {
+      const replacement = node.ownerDocument.createElement(url ? "a" : "button");
+      [...node.attributes].forEach((attribute) => { if (attribute.name !== "type") replacement.setAttribute(attribute.name, attribute.value); });
+      replacement.dataset.cmsOriginalTag = "button";
+      if (!url) replacement.type = "button";
+      while (node.firstChild) replacement.append(node.firstChild);
+      node.replaceWith(replacement);
+      node = replacement;
+    }
+    node.dataset.linkUrl = url;
+    node.dataset.linkTarget = link?.target === "_blank" ? "_blank" : "_self";
+    if (node.tagName === "A") {
+      if (url) node.setAttribute("href", url);
+      else node.removeAttribute("href");
+      node.target = node.dataset.linkTarget;
+      node.rel = "noopener noreferrer";
+    } else {
+      node.removeAttribute("href");
+      node.removeAttribute("target");
+      node.removeAttribute("rel");
+    }
+    return node;
+  }
+
+  function renderRecruitButtons(doc, content) {
+    const nav = doc.querySelector(".recruit-nav");
+    if (!nav) return;
+    nav.replaceChildren();
+    (content.recruitButtons || initial.recruitButtons).forEach((item) => {
+      const node = doc.createElement("a");
+      node.textContent = item.label;
+      if (item.key) node.dataset.cmsKey = item.key;
+      node.dataset.cmsButton = `recruit:${item.id}`;
+      applyLink(node, item);
+      nav.append(node);
+    });
   }
 
   function setImage(node, image) {
@@ -277,6 +366,7 @@
       if (faq.category !== previousCategory) {
         const heading = doc.createElement("h3");
         heading.textContent = faq.category || "よくある質問";
+        heading.dataset.faqCategory = faq.id;
         root.append(heading);
         previousCategory = faq.category;
       }
@@ -285,8 +375,10 @@
       item.dataset.faqId = faq.id;
       const question = doc.createElement("summary");
       question.textContent = faq.question;
+      question.dataset.faqEdit = "question";
       const answer = doc.createElement("div");
       answer.className = "answer";
+      answer.dataset.faqEdit = "answer";
       setText(answer, faq.answer);
       item.append(question, answer);
       root.append(item);
@@ -300,6 +392,7 @@
   }
 
   function renderPagePreview() {
+    commitInlineEditors();
     pageScroll = $("#preview").contentWindow?.scrollY || 0;
     $("#preview").srcdoc = pageDocument(state[previewMode]);
   }
@@ -311,7 +404,11 @@
     if (!node) return;
     if (field.type === "image") {
       setImage(node, state.draft.images[field.key]);
-    } else setText(node, state.draft.values[field.key], field.ownText);
+    } else {
+      const recruit = state.draft.recruitButtons.find((item) => item.key === field.key);
+      if (recruit) recruit.label = state.draft.values[field.key];
+      setText(node, state.draft.values[field.key], field.ownText);
+    }
   }
 
   function selectGroup(id, key, scrollPreview = false) {
@@ -324,11 +421,6 @@
       const target = key ? doc.querySelector(`[data-cms-key="${key}"]`) : doc.querySelector(`[data-cms-group="${id}"]`);
       target?.classList.add("cms-selected");
       if (scrollPreview) target?.scrollIntoView({ block: "start" });
-    }
-    if (key) {
-      const control = document.getElementById(`input-${key}`);
-      control?.scrollIntoView({ block: "nearest" });
-      control?.focus({ preventScroll: true });
     }
   }
 
@@ -379,6 +471,8 @@
       root.append(wrap);
     });
     if (selectedGroup === "faq") renderFAQFields(root);
+    const readonly = previewMode === "published";
+    $$("input,textarea,button", root).forEach((node) => { node.disabled = readonly; });
   }
 
   function readImage(file) {
@@ -397,8 +491,410 @@
     });
   }
 
+  function inlineText(node) {
+    const copy = node.cloneNode(true);
+    $$("[data-cms-ui]", copy).forEach((item) => item.remove());
+    $$("br", copy).forEach((br) => br.replaceWith("\n"));
+    return copy.textContent.replace(/\r\n/g, "\n");
+  }
+
+  function syncInline(node) {
+    if (!node?.isConnected || previewMode !== "draft") return;
+    const value = inlineText(node);
+    if (node.dataset.inlineField) {
+      const key = node.dataset.inlineField;
+      if (state.draft.values[key] === value) return;
+      state.draft.values[key] = value;
+      const control = document.getElementById(`input-${key}`);
+      if (control) control.value = value;
+    } else {
+      const faq = state.draft.faqs.find((item) => item.id === node.dataset.inlineFaq);
+      if (!faq) return;
+      const key = node.dataset.inlinePart;
+      if (faq[key] === value) return;
+      if (key === "category") {
+        const before = faq.category;
+        state.draft.faqs.forEach((item) => { if (item.category === before) item.category = value; });
+      } else faq[key] = value;
+    }
+    markDirty();
+  }
+
+  function commitInlineEditors() {
+    const editor = activeInline;
+    if (!editor) return;
+    // フォーカス移動でIMEの確定イベントを発生させ、入力DOMから値を確定する。
+    editor.blur();
+    syncInline(editor);
+    activeInline = null;
+  }
+
+  function insertPlainText(node, value) {
+    const selection = node.ownerDocument.getSelection();
+    if (!selection?.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    if (!node.contains(range.commonAncestorContainer)) return;
+    range.deleteContents();
+    const text = node.ownerDocument.createTextNode(value);
+    range.insertNode(text);
+    range.setStartAfter(text);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    syncInline(node);
+  }
+
+  function makeInline(node, attributes) {
+    if (!node || node.hasAttribute("contenteditable")) return;
+    node.setAttribute("contenteditable", "plaintext-only");
+    node.setAttribute("spellcheck", "false");
+    node.setAttribute("role", "textbox");
+    node.setAttribute("aria-multiline", "true");
+    Object.assign(node.dataset, attributes);
+    node.addEventListener("focus", () => { activeInline = node; });
+    node.addEventListener("input", () => syncInline(node));
+    node.addEventListener("compositionstart", () => { node.dataset.composing = "true"; });
+    node.addEventListener("compositionend", () => { delete node.dataset.composing; syncInline(node); });
+    node.addEventListener("blur", () => { syncInline(node); if (activeInline === node) activeInline = null; });
+    node.addEventListener("beforeinput", (event) => {
+      if (event.isComposing) return;
+      if (["insertParagraph", "insertLineBreak"].includes(event.inputType)) {
+        event.preventDefault(); insertPlainText(node, "\n");
+      } else if (event.inputType.startsWith("format")) event.preventDefault();
+    });
+    node.addEventListener("paste", (event) => {
+      event.preventDefault(); insertPlainText(node, event.clipboardData.getData("text/plain"));
+    });
+    node.addEventListener("drop", (event) => {
+      event.preventDefault(); insertPlainText(node, event.dataTransfer.getData("text/plain"));
+    });
+  }
+
+  function frameButton(doc, text, handler) {
+    const node = doc.createElement("button");
+    node.type = "button";
+    node.textContent = text;
+    node.addEventListener("click", handler);
+    return node;
+  }
+
+  function prepareInlineElements(doc) {
+    if (previewMode !== "draft") return;
+    fields.filter((field) => field.type === "text").forEach((field) => {
+      const node = doc.querySelector(`[data-cms-key="${field.key}"]`);
+      if (!node || node.dataset.cmsButton) return;
+      makeInline(node, { inlineField: field.key });
+    });
+    $$("[data-faq-edit]", doc).forEach((node) => {
+      makeInline(node, { inlineFaq: node.closest("[data-faq-id]").dataset.faqId, inlinePart: node.dataset.faqEdit });
+    });
+    $$("[data-faq-category]", doc).forEach((node) => makeInline(node, { inlineFaq: node.dataset.faqCategory, inlinePart: "category" }));
+    $$("[data-faq-id]", doc).forEach((item) => {
+      if ($("[data-cms-ui]", item)) return;
+      const tools = doc.createElement("div");
+      tools.dataset.cmsUi = "faq";
+      tools.className = "cms-inline-tools";
+      const id = item.dataset.faqId;
+      tools.append(
+        frameButton(doc, "↑", () => moveFAQ(id, -1)),
+        frameButton(doc, "↓", () => moveFAQ(id, 1)),
+        frameButton(doc, "削除", () => deleteFAQ(id)),
+      );
+      item.append(tools);
+    });
+    const faqRoot = $("#faq", doc);
+    if (faqRoot && !$("[data-cms-ui='faq-add']", faqRoot)) {
+      const add = frameButton(doc, "＋ 質問を追加", addFAQ);
+      add.dataset.cmsUi = "faq-add";
+      add.className = "cms-inline-add";
+      faqRoot.append(add);
+    }
+    const recruitNav = $(".recruit-nav", doc);
+    if (recruitNav && !$("[data-cms-ui='recruit-add']", recruitNav)) {
+      const add = frameButton(doc, "＋ ボタンを追加", addRecruitButton);
+      add.dataset.cmsUi = "recruit-add";
+      add.className = "cms-inline-add";
+      recruitNav.append(add);
+    }
+    const hero = $(".hero", doc);
+    const heroImage = hero && $("img[data-cms-key]", hero);
+    if (heroImage && !$("[data-cms-ui='hero-image']", hero)) {
+      const field = fields.find((item) => item.key === heroImage.dataset.cmsKey);
+      const edit = frameButton(doc, "メイン画像を編集", () => openImagePanel(doc, heroImage, field));
+      edit.dataset.cmsUi = "hero-image";
+      edit.className = "cms-hero-image-tool";
+      hero.append(edit);
+    }
+  }
+
+  function attachInlineEditor(doc) {
+    activeInline = null;
+    if (previewMode === "draft") {
+      const style = doc.createElement("style");
+      style.dataset.cmsUi = "style";
+      style.textContent = `
+        [contenteditable]{cursor:text;white-space:pre-wrap;overflow-wrap:anywhere;outline-offset:4px;min-height:1em}
+        [contenteditable]:hover,[data-cms-key]:hover,[data-cms-button]:hover{outline:2px dashed #5c9568;outline-offset:3px}
+        [contenteditable]:focus{outline:3px solid #458556;background:#f2f9ed80}
+        [data-cms-key], [data-cms-button]{cursor:pointer}
+        [contenteditable]{cursor:text}
+        .cms-selected{outline:2px solid #458556;outline-offset:3px}
+        .cms-inline-tools{display:flex;gap:8px;margin:10px 0 0;opacity:.65}
+        .cms-inline-tools button,.cms-inline-add{font:13px/1.5 Meiryo,sans-serif;color:#315638;background:#f1f7e7;border:1px solid #9db396;border-radius:6px;padding:7px 12px;cursor:pointer}
+        .cms-inline-add{margin:8px 0;min-height:42px}
+        .hero-copy{pointer-events:none}.hero-copy span{pointer-events:auto}
+        .cms-hero-image-tool{position:absolute;top:12px;right:12px;z-index:5;font:13px/1.5 Meiryo,sans-serif;padding:8px 12px;background:white;color:#315638;border:1px solid #8da983;border-radius:7px;box-shadow:0 2px 8px #18321c22;cursor:pointer}
+        .cms-inline-panel{position:fixed;z-index:99999;width:330px;max-height:90vh;overflow:auto;background:white;color:#244131;border:1px solid #adc0a5;border-radius:12px;padding:18px;box-shadow:0 6px 35px #18321c44;font:14px/1.6 Meiryo,sans-serif}
+        .cms-inline-panel *{box-sizing:border-box}
+        .cms-inline-panel h3{font-size:18px!important;margin:0 0 12px!important;color:#244131!important}
+        .cms-inline-panel label{display:block;font-weight:bold;font-size:12px;margin:12px 0 5px}
+        .cms-inline-panel input,.cms-inline-panel textarea,.cms-inline-panel select{width:100%;padding:9px;border:1px solid #c6d3c2;border-radius:5px;font:14px/1.5 Meiryo,sans-serif;background:white;color:#244131}
+        .cms-inline-panel textarea{min-height:75px;resize:vertical}
+        .cms-inline-panel p{font-size:11px!important;line-height:1.6!important;margin:10px 0!important;color:#61715b}
+        .cms-inline-panel button{font:13px/1.5 Meiryo,sans-serif;padding:7px 10px;border:1px solid #c6d3c2;border-radius:5px;background:#f1f7e7;color:#315638;cursor:pointer}
+        .cms-panel-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+        .cms-panel-error{color:#b32c22!important;min-height:1.5em}
+      `;
+      doc.head.append(style);
+      prepareInlineElements(doc);
+    }
+    doc.addEventListener("click", (event) => {
+      if (event.target.closest("[data-cms-ui]")) return;
+      const editable = event.target.closest("[contenteditable]");
+      const image = event.target.closest("img[data-cms-key]");
+      const buttonNode = event.target.closest("[data-cms-button]");
+      if (event.target.closest("a,button,summary")) event.preventDefault();
+      if (previewMode !== "draft") return;
+      closeInlinePanel(doc);
+      if (editable) {
+        const field = fields.find((item) => item.key === editable.dataset.inlineField);
+        selectGroup(field?.group || "faq");
+        // summaryの既定操作を止めてもテキストにキャレットを置けるようにする。
+        if (doc.activeElement !== editable) editable.focus({ preventScroll: true });
+      } else if (image) {
+        const field = fields.find((item) => item.key === image.dataset.cmsKey);
+        selectGroup(field.group);
+        openImagePanel(doc, image, field);
+      } else if (buttonNode) {
+        const item = buttonNode.dataset.cmsButton.startsWith("recruit:")
+          ? state.draft.recruitButtons.find((entry) => `recruit:${entry.id}` === buttonNode.dataset.cmsButton)
+          : buttons.find((entry) => entry.key === buttonNode.dataset.cmsButton);
+        if (item) { selectGroup(item.group || "hero"); openButtonPanel(doc, buttonNode, item); }
+      }
+    });
+    doc.defaultView.addEventListener("resize", () => {
+      const panel = $(".cms-inline-panel", doc);
+      if (panel) fitInlinePanel(panel);
+    });
+  }
+
+  function closeInlinePanel(doc = $("#preview").contentDocument) {
+    $(".cms-inline-panel", doc)?.remove();
+  }
+
+  function panelAt(doc, target, title) {
+    commitInlineEditors();
+    closeInlinePanel(doc);
+    const panel = doc.createElement("aside");
+    panel.dataset.cmsUi = "panel";
+    panel.className = "cms-inline-panel";
+    panel.setAttribute("role", "dialog");
+    panel.setAttribute("aria-label", title);
+    const heading = doc.createElement("h3"); heading.textContent = title;
+    panel.append(heading);
+    doc.body.append(panel);
+    const rect = target.getBoundingClientRect();
+    const left = Math.min(Math.max(10, rect.left), Math.max(10, doc.documentElement.clientWidth - 340));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${Math.max(10, Math.min(rect.bottom + 8, doc.documentElement.clientHeight - 360))}px`;
+    panel.addEventListener("keydown", (event) => { if (event.key === "Escape") closeInlinePanel(doc); });
+    return panel;
+  }
+
+  function fitInlinePanel(panel) {
+    const doc = panel.ownerDocument;
+    const height = doc.documentElement.clientHeight;
+    const width = doc.documentElement.clientWidth;
+    panel.style.maxHeight = `${Math.max(100, height - 24)}px`;
+    panel.style.width = `${Math.min(330, Math.max(150, width - 24))}px`;
+    const rect = panel.getBoundingClientRect();
+    const top = Number.parseFloat(panel.style.top) || 12;
+    const left = Number.parseFloat(panel.style.left) || 12;
+    panel.style.top = `${Math.max(12, Math.min(top, height - rect.height - 12))}px`;
+    panel.style.left = `${Math.max(12, Math.min(left, width - rect.width - 12))}px`;
+  }
+
+  function panelInput(doc, panel, label, value, handler, tag = "input") {
+    const wrap = doc.createElement("label");
+    wrap.textContent = label;
+    const input = doc.createElement(tag);
+    input.value = value;
+    input.setAttribute("aria-label", label);
+    input.addEventListener("input", () => handler(input.value));
+    panel.append(wrap, input);
+    return input;
+  }
+
+  function panelLinks(doc, panel, link, onChange) {
+    const error = doc.createElement("p"); error.className = "cms-panel-error";
+    const input = panelInput(doc, panel, "リンク先（空欄でリンクなし）", link.url || "", (value) => {
+      try {
+        const url = model.safeUrl(value, siteBase);
+        error.textContent = ""; input.removeAttribute("aria-invalid");
+        link.url = url; onChange();
+      } catch (failure) {
+        error.textContent = `${failure.message} この入力は保存されません。`;
+        input.setAttribute("aria-invalid", "true");
+      }
+      fitInlinePanel(panel);
+    });
+    input.placeholder = "#requirements / https://... / tel:...";
+    panel.append(error);
+    const target = panelInput(doc, panel, "開き方", "", () => {}, "select");
+    [["_self", "同じタブ"], ["_blank", "新しいタブ"]].forEach(([value, text]) => {
+      const option = doc.createElement("option"); option.value = value; option.textContent = text; target.append(option);
+    });
+    target.value = link.target || "_self";
+    target.addEventListener("change", () => { link.target = target.value; onChange(); });
+  }
+
+  function openImagePanel(doc, node, field) {
+    const panel = panelAt(doc, node, "画像を編集");
+    const note = doc.createElement("p"); note.textContent = "PNG・JPEG・WebP、2MBまで。元の表示枠に合わせます。";
+    panel.append(note);
+    const input = doc.createElement("input");
+    input.type = "file"; input.accept = "image/png,image/jpeg,image/webp";
+    input.setAttribute("aria-label", "差し替える画像");
+    input.addEventListener("change", async () => {
+      const file = input.files[0]; if (!file) return;
+      try {
+        const data = await readImage(file);
+        state.draft.images[field.key].src = data;
+        markDirty(); updatePreviewField(field); renderFields();
+        toast("画像を差し替えました。");
+      } catch (error) { toast(error.message); }
+      input.value = "";
+    });
+    panel.append(input);
+    panelInput(doc, panel, "画像の説明（代替テキスト）", state.draft.images[field.key].alt, (value) => {
+      state.draft.images[field.key].alt = value;
+      markDirty(); updatePreviewField(field);
+    });
+    let buttonNode = node.closest("[data-cms-button]");
+    if (buttonNode) panelLinks(doc, panel, state.draft.links[buttonNode.dataset.cmsButton], () => {
+      buttonNode = applyLink(buttonNode, state.draft.links[buttonNode.dataset.cmsButton]); markDirty();
+    });
+    const controls = doc.createElement("div"); controls.className = "cms-panel-actions";
+    controls.append(
+      frameButton(doc, "元画像に戻す", () => {
+        state.draft.images[field.key] = clone(initial.images[field.key]);
+        markDirty(); updatePreviewField(field); renderFields();
+        openImagePanel(doc, node, field);
+      }),
+      frameButton(doc, "閉じる", () => closeInlinePanel(doc)),
+    );
+    panel.append(controls);
+    fitInlinePanel(panel);
+  }
+
+  function openButtonPanel(doc, node, item) {
+    const dynamic = !!item.id;
+    const panel = panelAt(doc, node, "ボタンを編集");
+    const field = dynamic ? fields.find((entry) => entry.key === item.key) : item.field;
+    if (dynamic || field) panelInput(doc, panel, "表示名", dynamic ? item.label : state.draft.values[field.key], (value) => {
+      if (dynamic) item.label = value;
+      if (field) state.draft.values[field.key] = value;
+      setText(node, value, field?.ownText);
+      markDirty();
+      const control = field && document.getElementById(`input-${field.key}`);
+      if (control) control.value = value;
+    });
+    const link = dynamic ? item : state.draft.links[item.key];
+    panelLinks(doc, panel, link, () => { node = applyLink(node, link); markDirty(); });
+    const note = doc.createElement("p"); note.textContent = "プレビュー内ではリンクを実行しません。変更は下書きへ記録されます。";
+    panel.append(note);
+    const controls = doc.createElement("div"); controls.className = "cms-panel-actions";
+    if (dynamic) {
+      const index = state.draft.recruitButtons.findIndex((entry) => entry.id === item.id);
+      const up = frameButton(doc, "← 前へ", () => moveRecruitButton(item.id, -1)); up.disabled = index === 0;
+      const down = frameButton(doc, "次へ →", () => moveRecruitButton(item.id, 1)); down.disabled = index === state.draft.recruitButtons.length - 1;
+      controls.append(up, down, frameButton(doc, "削除", () => deleteRecruitButton(item.id)), frameButton(doc, "＋ 追加", addRecruitButton));
+    }
+    controls.append(frameButton(doc, "閉じる", () => closeInlinePanel(doc)));
+    panel.append(controls);
+    fitInlinePanel(panel);
+  }
+
+  function refreshRecruitButtons() {
+    commitInlineEditors();
+    const doc = $("#preview").contentDocument;
+    closeInlinePanel(doc);
+    renderRecruitButtons(doc, state.draft);
+    prepareInlineElements(doc);
+    renderFields();
+  }
+
+  function addRecruitButton() {
+    commitInlineEditors();
+    const item = { id: crypto.randomUUID(), label: "新しいボタン", url: "", target: "_self" };
+    state.draft.recruitButtons.push(item);
+    markDirty(); refreshRecruitButtons();
+    const doc = $("#preview").contentDocument;
+    const node = doc.querySelector(`[data-cms-button="recruit:${item.id}"]`);
+    node.scrollIntoView({ block: "nearest" }); openButtonPanel(doc, node, item);
+  }
+
+  function moveRecruitButton(id, direction) {
+    commitInlineEditors();
+    const list = state.draft.recruitButtons;
+    const index = list.findIndex((item) => item.id === id);
+    const next = index + direction;
+    if (index < 0 || next < 0 || next >= list.length) return;
+    [list[index], list[next]] = [list[next], list[index]];
+    markDirty(); refreshRecruitButtons();
+    const doc = $("#preview").contentDocument;
+    openButtonPanel(doc, doc.querySelector(`[data-cms-button="recruit:${id}"]`), list[next]);
+  }
+
+  async function deleteRecruitButton(id) {
+    commitInlineEditors();
+    if (!await confirmAction("このボタンを下書きから削除しますか？反映済みページは次の反映まで保持されます。", "ボタンを削除")) return;
+    state.draft.recruitButtons = state.draft.recruitButtons.filter((item) => item.id !== id);
+    markDirty(); refreshRecruitButtons();
+  }
+
+  function addFAQ() {
+    commitInlineEditors();
+    const item = { id: crypto.randomUUID(), category: state.draft.faqs.at(-1)?.category || "よくある質問", question: "新しい質問", answer: "回答を入力してください。" };
+    state.draft.faqs.push(item); markDirty(); syncFAQ(); renderFields();
+    const node = $("#preview").contentDocument.querySelector(`[data-faq-id="${item.id}"]`);
+    node.scrollIntoView({ block: "nearest" });
+    $("summary", node).focus({ preventScroll: true });
+  }
+
+  function moveFAQ(id, direction) {
+    commitInlineEditors();
+    const list = state.draft.faqs;
+    const index = list.findIndex((item) => item.id === id);
+    const next = index + direction;
+    if (next < 0 || next >= list.length) return;
+    [list[index], list[next]] = [list[next], list[index]];
+    markDirty(); syncFAQ(); renderFields();
+  }
+
+  async function deleteFAQ(id) {
+    commitInlineEditors();
+    if (!await confirmAction("この質問を下書きから削除しますか？反映済みページは次の反映まで保持されます。", "質問を削除")) return;
+    state.draft.faqs = state.draft.faqs.filter((item) => item.id !== id);
+    markDirty(); syncFAQ(); renderFields();
+  }
+
   function syncFAQ() {
-    if (previewMode === "draft") renderFAQDocument($("#preview").contentDocument, state.draft);
+    if (previewMode === "draft") {
+      commitInlineEditors();
+      renderFAQDocument($("#preview").contentDocument, state.draft);
+      prepareInlineElements($("#preview").contentDocument);
+    }
   }
 
   function renderFAQFields(root) {
@@ -466,16 +962,20 @@
     const textCount = fields.filter((field) => field.type === "text" && draft.values[field.key] !== published.values[field.key]).length;
     const imageCount = fields.filter((field) => field.type === "image" && JSON.stringify(draft.images[field.key]) !== JSON.stringify(published.images[field.key])).length;
     const faqChanged = JSON.stringify(draft.faqs) !== JSON.stringify(published.faqs);
-    const articleChanged = draft.articles.filter((article) => JSON.stringify(article) !== JSON.stringify(published.articles.find((item) => item.id === article.id))).length;
+      const articleChanged = draft.articles.filter((article) => JSON.stringify(article) !== JSON.stringify(published.articles.find((item) => item.id === article.id))).length;
     const removedArticles = published.articles.filter((article) => !draft.articles.some((item) => item.id === article.id)).length;
-    return { textCount, imageCount, faqChanged, articleChanged, removedArticles };
+    const buttonsChanged = JSON.stringify(draft.recruitButtons) !== JSON.stringify(published.recruitButtons);
+    const linksChanged = Object.keys(draft.links).filter((key) => JSON.stringify(draft.links[key]) !== JSON.stringify(published.links[key])).length;
+    return { textCount, imageCount, faqChanged, articleChanged, removedArticles, buttonsChanged, linksChanged };
   }
 
   function openPublish() {
+    commitInlineEditors();
     const changes = changesSummary();
     const root = $("#changes");
     root.replaceChildren();
     root.append(createElement("p", {}, `文章 ${changes.textCount}項目 / 画像・説明 ${changes.imageCount}項目`));
+    root.append(createElement("p", {}, `リンク設定 ${changes.linksChanged}項目 / 採用ボタン群 ${changes.buttonsChanged ? "変更あり" : "変更なし"}`));
     root.append(createElement("p", {}, changes.faqChanged ? `FAQを更新（${state.draft.faqs.length}件）` : "FAQの変更なし"));
     root.append(createElement("p", {}, `記事の追加・更新 ${changes.articleChanged}件 / 削除 ${changes.removedArticles}件`));
     root.append(createElement("p", {}, `掲載設定の記事 ${state.draft.articles.filter((article) => article.listed).length}件を読者向け一覧に表示します。`));
@@ -484,6 +984,7 @@
 
   async function publish() {
     if (busy) return;
+    commitInlineEditors();
     if (!db) return toast("ブラウザ保存を利用できないため反映できません。");
     const listed = state.draft.articles.filter((article) => article.listed);
     const invalid = listed.find((article) => !article.title.trim() || !article.body.trim() || !article.slug.trim());
@@ -539,7 +1040,9 @@
       card.append(info, button("下書きへ復元", async () => {
         if (busy) return;
         if (!await confirmAction("この時点の内容を下書きへ復元しますか？現在の下書きは置き換わります。反映済み表示は変わりません。", "下書きへ復元")) return;
-        state.draft = clone(entry.content);
+        commitInlineEditors();
+        state.draft = model.completeContent(entry.content, initial);
+        activeInline = null;
         selectedArticle = state.draft.articles[0]?.id || null;
         markDirty(); renderFields(); renderPagePreview(); renderArticles();
         await saveDraft();
@@ -718,6 +1221,7 @@
   }
 
   function setDevice(value) {
+    commitInlineEditors();
     device = value;
     $$("[data-device]").forEach((item) => item.classList.toggle("active", item.dataset.device === value));
     $("#preview-size").textContent = `${device === "mobile" ? 375 : 1080}px`;
@@ -725,6 +1229,7 @@
   }
 
   function switchView(value) {
+    commitInlineEditors();
     view = value;
     $$("[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === value));
     ["pages", "articles", "history"].forEach((name) => { $(`#${name}-view`).hidden = name !== value; });
@@ -735,6 +1240,7 @@
   }
 
   function exportData() {
+    commitInlineEditors();
     const blob = new Blob([JSON.stringify({ schemaVersion: 1, siteId: "site-frame2", exportedAt: new Date().toISOString(), ...state }, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = createElement("a", { href: url, download: `frame-cms-${new Date().toISOString().slice(0, 10)}.json` });
@@ -750,9 +1256,9 @@
       const saved = await readState();
       if (saved?.version === 1 && saved.draft && saved.published && Array.isArray(saved.history)) {
         ["draft", "published"].forEach((name) => {
-          saved[name].values = { ...initial.values, ...saved[name].values };
-          saved[name].images = { ...initial.images, ...saved[name].images };
+          saved[name] = model.completeContent(saved[name], initial);
         });
+        saved.history.forEach((entry) => { entry.content = model.completeContent(entry.content, initial); });
         state = saved;
       }
     } catch (error) {
@@ -766,9 +1272,13 @@
     $$("[data-view]").forEach((item) => item.addEventListener("click", () => switchView(item.dataset.view)));
     $$("[data-device]").forEach((item) => item.addEventListener("click", () => setDevice(item.dataset.device)));
     $$("[data-preview]").forEach((item) => item.addEventListener("click", () => {
+      commitInlineEditors();
       previewMode = item.dataset.preview;
       $$("[data-preview]").forEach((entry) => entry.classList.toggle("active", entry === item));
       renderPagePreview();
+      renderFields();
+      $("#editing-mode").textContent = previewMode === "draft" ? "クリックして直接編集" : "反映済み・閲覧専用";
+      $("#inline-mode-label").textContent = previewMode === "draft" ? "ページ上で編集できます" : "閲覧専用・編集できません";
     }));
     $("#save").addEventListener("click", saveDraft);
     $("#publish").addEventListener("click", openPublish);
@@ -779,19 +1289,7 @@
     $("#preview").addEventListener("load", () => {
       $("#preview").contentWindow.scrollTo(0, pageScroll);
       const doc = $("#preview").contentDocument;
-      doc.addEventListener("click", (event) => {
-        const target = event.target.closest("[data-cms-key], [data-faq-id]");
-        if (target) {
-          event.preventDefault();
-          const faqId = target.dataset.faqId;
-          const field = fields.find((entry) => entry.key === target.dataset.cmsKey);
-          selectGroup(faqId ? "faq" : field?.group || selectedGroup, target.dataset.cmsKey);
-          if (faqId) document.getElementById(`form-${faqId}`)?.scrollIntoView({ block: "nearest" });
-          return;
-        }
-        const link = event.target.closest("a,button");
-        if (link) { event.preventDefault(); toast("プレビュー内のリンク・送信操作は編集用です。"); }
-      });
+      attachInlineEditor(doc);
       fitPreviews();
     });
     new ResizeObserver(fitPreviews).observe($("#canvas"));
