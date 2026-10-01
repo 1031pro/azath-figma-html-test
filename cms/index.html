@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>Frame CMS｜ゆ〜かり整骨院</title><link rel="stylesheet" href="cms.css"></head>
+<body>
+<aside class="sidebar">
+  <a class="wordmark" href="./"><span class="mark">f</span>frame<span class="light">CMS</span></a>
+  <div class="workspace"><span class="site-icon">ゆ</span><div><strong>ゆ〜かり整骨院</strong><small>採用サイト / Frame 2</small></div></div>
+  <div class="nav-label">WORKSPACE</div>
+  <nav><button data-view="pages" class="active"><span>▤</span>ページを編集</button><button data-view="articles"><span>▧</span>記事をつくる</button><button data-view="history"><span>◷</span>反映履歴</button></nav>
+  <div class="sidebar-bottom"><span class="demo-pill">DEMO WORKSPACE</span><p>変更はこのブラウザに保存。<br>公開中のLPには影響しません。</p><button id="export-data" class="text-button">編集データを書き出す ↗</button></div>
+</aside>
+<main class="main">
+  <header class="topbar"><div><span class="eyebrow">DESIGN FIRST, CONTENT NEXT</span><h1 id="view-title">ページを編集</h1></div><div class="top-actions"><span id="save-status" role="status">準備中…</span><button id="save" class="btn">下書き保存</button><button id="publish" class="btn primary">デモに反映 <span>↗</span></button></div></header>
+  <div class="context"><div><span class="live-dot"></span><strong>採用ランディングページ</strong><span class="tag">Frame 2</span></div><span>デザインを保ったまま、内容を更新</span></div>
+  <section id="pages-view" class="view editor-grid">
+    <aside class="inspector"><div class="inspector-head"><span class="eyebrow">CONTENT EDITOR</span><h2>編集する箇所</h2><p>右のページをクリックしても選べます。</p><label for="section-select" class="sr-only">編集セクション</label><select id="section-select"></select></div><div id="fields"></div></aside>
+    <div class="preview-panel"><div class="preview-toolbar"><div class="segmented"><button data-preview="draft" class="active">編集中</button><button data-preview="published">反映済み</button></div><div class="segmented"><button data-device="desktop" class="active">PC</button><button data-device="mobile">スマホ</button></div><span id="preview-size">1080px</span></div><div class="preview-scroll" id="canvas"><div class="frame-holder"><iframe id="preview" title="Frame 2 編集プレビュー" sandbox="allow-same-origin"></iframe></div></div><div class="preview-note">編集中の内容は「デモに反映」を押すまで反映済みページに変わりません。</div></div>
+  </section>
+  <section id="articles-view" class="view" hidden><div class="articles-layout"><aside class="article-list"><div class="list-heading"><h2>記事</h2><button id="add-article" class="btn small primary">＋ 新規</button></div><p class="muted">サイトと同じデザインで情報を届ける。</p><div id="article-items"></div></aside><div id="article-editor"></div></div></section>
+  <section id="history-view" class="view" hidden><div class="history-intro"><span class="eyebrow">VERSION HISTORY</span><h2>変更を、いつでも振り返る。</h2><p>反映した内容を10件まで保存します。復元は下書きに取り込みます。</p></div><div id="history-items"></div></section>
+</main>
+<div id="toast" role="status" hidden></div>
+<dialog id="publish-dialog"><span class="eyebrow">REVIEW & APPLY</span><h2>デモ表示に反映しますか？</h2><p>下書きのページ・記事を、このブラウザの反映済み表示へまとめて反映します。</p><div id="changes"></div><div class="dialog-actions"><button id="cancel-publish" class="btn">戻る</button><button id="confirm-publish" class="btn primary">この内容を反映</button></div></dialog>
+<script src="source.js"></script><script src="app.js"></script>
+</body></html>
