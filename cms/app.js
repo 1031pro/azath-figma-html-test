@@ -37,6 +37,8 @@
   let role = "admin";
   let selectedPage = "recruit";
   let db;
+  let importedSite = null;
+  let selectedTerm = "";
   let dirty = false;
   let revision = 0;
   let busy = false;
@@ -979,7 +981,7 @@
     const buttonsChanged = JSON.stringify(draft.recruitButtons) !== JSON.stringify(published.recruitButtons);
     const settingsChanged = JSON.stringify(draft.settings) !== JSON.stringify(published.settings);
     const linksChanged = Object.keys(draft.links).filter((key) => JSON.stringify(draft.links[key]) !== JSON.stringify(published.links[key])).length;
-    return { textCount, imageCount, faqChanged, articleChanged, removedArticles, buttonsChanged, linksChanged, settingsChanged, pagesChanged: JSON.stringify(draft.pages) !== JSON.stringify(published.pages) };
+    return { textCount, imageCount, faqChanged, articleChanged, removedArticles, buttonsChanged, linksChanged, settingsChanged, pagesChanged: JSON.stringify(draft.pages) !== JSON.stringify(published.pages), termsChanged: JSON.stringify([draft.taxonomies,draft.archives]) !== JSON.stringify([published.taxonomies,published.archives]) };
   }
 
   function openPublish() {
@@ -995,6 +997,7 @@
     root.append(createElement("p", {}, `掲載設定の記事 ${state.draft.articles.filter((article) => article.listed).length}件を読者向け一覧に表示します。`));
     root.append(createElement("p", {}, `サイト共通・SEO設定：${changes.settingsChanged ? "変更あり" : "変更なし"}`));
     root.append(createElement("p", {}, `固定ページ：${changes.pagesChanged ? "変更あり" : "変更なし"} / 掲載 ${state.draft.pages.filter(p => p.listed).length}件`));
+    root.append(createElement("p", {}, `カテゴリー・タグページ：${changes.termsChanged ? "変更あり" : "変更なし"}`));
     $("#publish-dialog").showModal();
   }
 
@@ -1031,7 +1034,7 @@
       if (revision === savedRevision) dirty = false;
       $("#publish-dialog").close();
       if (previewMode === "published") renderPagePreview();
-      renderArticleItems(); renderArticlePreview(); renderHistory(); renderSettings(); renderFixedPages();
+      renderArticleItems(); renderArticlePreview(); renderHistory(); renderSettings(); renderFixedPages(); if(view === "terms")renderTerms();
       toast(revision === savedRevision
         ? "このブラウザのデモ表示に反映しました。"
         : "デモ表示に反映しました。処理中に追加した変更は下書きに残っています。");
@@ -1077,7 +1080,7 @@
       id: crypto.randomUUID(), title: sample ? "院内見学の前に確認したいこと" : "", slug: `article-${Date.now()}`,
       summary: sample ? "見学前に整理しておくと役立つ質問を紹介します。" : "",
       body: sample ? "院内見学では、職場の雰囲気やスタッフの動きを実際に確認できます。\n\n## 先に質問を整理する\n\n研修の進め方、勤務時間、配属先など、知りたいことをメモしておきましょう。\n\n## 現場の様子を見る\n\n患者さんへの説明やスタッフ同士のやり取りを見て、自分に合う職場か考えてみましょう。\n\n※操作確認のための固定サンプルです。掲載前に内容を確認してください。" : "",
-      category: "", tags: [], seoTitle: "", seoDescription: "",
+      category: "", categories: [], tags: [], seoTitle: "", seoDescription: "",
       author: "採用担当", date: new Date().toLocaleDateString("sv-SE"), listed: false,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sample,
     };
@@ -1092,13 +1095,17 @@
     const root = $("#article-items");
     root.replaceChildren();
     if (!state.draft.articles.length) root.append(createElement("p", { className: "muted" }, "新規作成して、タイトルと本文を入力してください。"));
-    contentModel.union(state.draft.articles, state.published.articles).forEach((article) => {
+    const items = contentModel.union(state.draft.articles, state.published.articles);
+    updateTypeOptions("article", items);
+    const matching = contentModel.search(items, $("#article-search").value, $("#article-type").value);
+    $("#article-count").textContent = `${matching.length} / ${items.length}件`;
+    matching.forEach((article) => {
       const item = button("", () => { selectedArticle = article.id; articleRoute = "detail"; renderArticles(); }, `article-item${selectedArticle === article.id ? " active" : ""}`);
       item.append(createElement("strong", {}, article.title || "タイトル未入力"));
       const live = state.published.articles.find((entry) => entry.id === article.id);
       const label = !state.draft.articles.some(item => item.id === article.id) ? "次の反映で削除" : !live ? "未反映" : JSON.stringify(live) !== JSON.stringify(article) ? "変更あり" : "反映済み";
       item.append(createElement("small", {}, `${article.listed ? "掲載する" : "下書き"} · ${label}`));
-      item.append(createElement("small", {}, `${article.category || "未分類"} / ${(article.tags || []).join("・") || "タグなし"}`));
+      item.append(createElement("small", {}, `${contentModel.categories(article).join("・")} / ${(article.tags || []).join("・") || "タグなし"}`));
       root.append(item);
     });
     renderTaxonomy();
@@ -1123,18 +1130,20 @@
     const form = createElement("div", { className: "article-form" });
     form.append(createElement("h2", {}, "記事を編集"));
     if (article.sample) form.append(createElement("p", { className: "sample-note" }, "操作確認用のサンプルです。"));
-    [["title", "タイトル", "input"], ["slug", "URL名（半角英数字・ハイフン）", "input"], ["summary", "概要", "textarea"], ["body", "本文（行頭の ## は見出しになります）", "textarea"], ["author", "著者", "input"], ["date", "記事の日付", "input"], ["category", "カテゴリー", "input"], ["tags", "タグ（カンマ区切りで複数指定）", "input"], ["seoTitle", "検索表示用タイトル（空欄なら記事タイトル）", "input"], ["seoDescription", "検索表示用説明（空欄なら概要）", "textarea"]].forEach(([key, label, tag]) => {
+    [["title", "タイトル", "input"], ["slug", "URL名（半角英数字・ハイフン）", "input"], ["summary", "概要", "textarea"], ["body", "本文（行頭の ## は見出しになります）", "textarea"], ["author", "著者", "input"], ["date", "記事の日付", "input"], ["categories", "カテゴリー（カンマ区切りで複数指定）", "input"], ["tags", "タグ（カンマ区切りで複数指定）", "input"], ["seoTitle", "検索表示用タイトル（空欄なら記事タイトル）", "input"], ["seoDescription", "検索表示用説明（空欄なら概要）", "textarea"]].forEach(([key, label, tag]) => {
       const id = `article-${key}`;
-      const control = createElement(tag, { id, value: key === "tags" ? (article.tags || []).join(", ") : article[key], className: key === "summary" ? "summary-input" : "", maxlength: key === "body" ? "60000" : "1000" });
+      const control = createElement(tag, { id, value: ["tags","categories"].includes(key) ? (article[key] || []).join(", ") : article[key], className: key === "summary" ? "summary-input" : "", maxlength: key === "body" ? "60000" : "1000" });
       if (key === "date") control.type = "date";
       control.addEventListener("input", () => {
-        article[key] = key === "slug" ? control.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() : key === "tags" ? contentModel.tags(control.value) : key === "category" ? control.value.trim() : control.value;
+        article[key] = key === "slug" ? control.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() : ["tags","categories"].includes(key) ? contentModel.tags(control.value) : control.value;
         if (key === "slug") control.value = article[key];
+        if (key === "categories") article.category = article.categories[0] || "";
         article.updatedAt = new Date().toISOString();
         markDirty(); renderArticleItems(); renderArticlePreview();
       });
       form.append(createElement("label", { for: id, className: "input-label" }, label), control);
     });
+    renderSourceFields(form, article, () => {markDirty();renderArticlePreview();});
     const suggestions = createElement("div", {className:"tag-suggestions"});
     suggestions.append(createElement("p", {className:"muted"}, "本文に2回以上出てくる語からタグ候補を作ります。候補を選ぶと既存のタグに追加されます。"));
     const candidates = createElement("div", {"aria-live":"polite"});
@@ -1181,13 +1190,14 @@
     }));
     const canvas = createElement("div", { id: "article-canvas", className: "preview-scroll" });
     const holder = createElement("div", { className: "frame-holder" });
-    const iframe = createElement("iframe", { id: "article-preview-frame", title: "読者向け記事プレビュー", sandbox: "allow-same-origin" });
+    const iframe = createElement("iframe", { id: "article-preview-frame", title: "読者向け記事プレビュー", sandbox: "allow-same-origin allow-popups allow-popups-to-escape-sandbox" });
     iframe.addEventListener("load", () => {
       iframe.contentWindow.scrollTo(0, Number(iframe.dataset.scroll || 0));
       const doc = iframe.contentDocument;
       doc.addEventListener("click", (event) => {
         const link = event.target.closest("a,button");
         if (!link) return;
+        if (link.dataset.sourceLink !== undefined) return;
         event.preventDefault();
         if (link.dataset.articleId) { selectedArticle = link.dataset.articleId; articleRoute = "detail"; renderArticles(); }
         else if (link.dataset.taxonomyKind) { taxonomyKind = link.dataset.taxonomyKind; taxonomyName = link.dataset.taxonomyName; articleRoute = "taxonomy"; renderArticles(); }
@@ -1225,11 +1235,13 @@
       const node = doc.createElement(tag); node.textContent = text; parent.append(node); return node;
     };
     const taxonomyLinks = (item, parent) => {
-      const values = [["category", item.category || "未分類"], ...(item.tags || []).map(tag => ["tag", tag])];
+      const values = [...contentModel.categories(item).map(name => ["category", name]), ...(item.tags || []).map(tag => ["tag", tag])];
       values.forEach(([kind, name]) => { const a = append("a", (kind === "tag" ? "#" : "") + name, parent); a.href = "#" + kind + "-" + encodeURIComponent(name); a.dataset.taxonomyKind = kind; a.dataset.taxonomyName = name; a.style.marginRight = "14px"; });
     };
+    const taxonomyTerm = articleRoute === "taxonomy" ? contentModel.catalog(content,taxonomyKind || "category").find(t=>t.name === taxonomyName) : null;
     if (articleRoute !== "detail") {
-      append("h1", articleRoute === "taxonomy" && taxonomyKind ? taxonomyName + "の記事" : "採用コラム・お知らせ");
+      append("h1", articleRoute === "taxonomy" && taxonomyKind ? taxonomyName + "の記事" : "記事一覧");
+      if(taxonomyTerm?.description)appendPlainBody(doc,root,taxonomyTerm.description);
       const nav = append("nav", ""); nav.setAttribute("aria-label", "記事の分類");
       ["category", "tag"].forEach(kind => contentModel.taxonomy(content.articles.filter(a => a.listed), kind).forEach((items, name) => { const a = append("a", (kind === "tag" ? "#" : "") + name + " (" + items.length + ")", nav); a.href = "#" + kind + "-" + encodeURIComponent(name); a.dataset.taxonomyKind = kind; a.dataset.taxonomyName = name; a.style.marginRight = "14px"; }));
       const listed = contentModel.filter(content.articles, articleRoute === "taxonomy" ? taxonomyKind : "", taxonomyName);
@@ -1261,6 +1273,7 @@
         else paragraph.push(line);
       });
       flushParagraph();
+      appendSourceMedia(doc, root, article);
     } else {
       append("h1", "この記事は反映済み表示に掲載されていません");
       append("p", "記事を掲載する設定にし、デモに反映すると読者向け表示を確認できます。");
@@ -1268,7 +1281,7 @@
     const back = append("a", "記事一覧へ"); back.href = "#articles"; back.dataset.articleList = "";
     main.append(root);
     const shown = article && (articleMode === "draft" || article.listed);
-    contentModel.head(doc, content.settings, articleRoute === "detail" ? { title: shown ? article.seoTitle || article.title : "未掲載の記事", description: shown ? article.seoDescription || article.summary : "", type: "article" } : { title: articleRoute === "taxonomy" && taxonomyKind ? taxonomyName + "の記事" : "採用コラム・お知らせ", description: "" });
+    contentModel.head(doc, content.settings, articleRoute === "detail" ? { title: shown ? article.seoTitle || article.title : "未掲載の記事", description: shown ? article.seoDescription || article.summary : "", type: "article" } : { title: articleRoute === "taxonomy" && taxonomyKind ? taxonomyTerm?.seoTitle || taxonomyName + "の記事" : "記事一覧", description: taxonomyTerm?.seoDescription || taxonomyTerm?.description || "" });
     iframe.srcdoc = "<!doctype html>" + doc.documentElement.outerHTML;
   }
 
@@ -1317,7 +1330,11 @@
   function renderFixedPages() {
     const root = $("#fixed-editor"); root.replaceChildren();
     const list = $("#fixed-items"); list.replaceChildren();
-    contentModel.union(state.draft.pages, state.published.pages).forEach(page => list.append(button(page.title || "無題の固定ページ", () => {selectedPage=page.id;renderFixedPages();}, "article-item")));
+    const items = contentModel.union(state.draft.pages, state.published.pages);
+    updateTypeOptions("fixed", items);
+    const matching = contentModel.search(items, $("#fixed-search").value, $("#fixed-type").value);
+    $("#fixed-count").textContent = `${matching.length} / ${items.length}件`;
+    matching.forEach(page => list.append(button(page.title || "無題の固定ページ", () => {selectedPage=page.id;renderFixedPages();}, "article-item")));
     const draftPage = state.draft.pages.find(p => p.id === selectedPage);
     const page = draftPage || clone(state.published.pages.find(p => p.id === selectedPage) || null);
     if (!page) { root.append(createElement("p", {}, "固定ページを追加、または一覧から選択してください。")); return; }
@@ -1328,13 +1345,14 @@
       input.addEventListener("input", () => {if(role === "viewer")return;page[key]=key === "slug" ? input.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() : input.value;markDirty();renderFixedPreview();});
       form.append(createElement("label", {for:id,className:"input-label"},label),input);
     });
+    renderSourceFields(form, page, () => {markDirty();renderFixedPreview();});
     const check=createElement("input", {type:"checkbox",checked:page.listed});check.addEventListener("change",()=>{if(role === "viewer")return;page.listed=check.checked;markDirty();renderFixedPreview();});
     const label=createElement("label",{className:"listing-option"},"次の反映で掲載する");label.prepend(check);form.append(label);
     if(page.template === "recruit") form.append(button("採用ページの内容を直接編集",()=>switchView("pages")));
     form.append(button("固定ページを削除",async()=>{if(role === "viewer")return;if(!await confirmAction("固定ページを下書きから削除しますか？反映済み表示は次の反映まで残ります。","削除"))return;if(role === "viewer")return;state.draft.pages=state.draft.pages.filter(p=>p.id!==page.id);markDirty();renderFixedPages();}));
     const preview=createElement("div",{className:"article-form"});
     const mode=createElement("select",{id:"fixed-mode","aria-label":"固定ページプレビューの版"});mode.append(createElement("option",{value:"draft"},"編集中"),createElement("option",{value:"published"},"反映済み"));if(!draftPage)mode.value="published";mode.addEventListener("change",renderFixedPreview);
-    const frame=createElement("iframe",{id:"fixed-preview",title:"固定ページプレビュー",sandbox:"allow-same-origin"});
+    const frame=createElement("iframe",{id:"fixed-preview",title:"固定ページプレビュー",sandbox:"allow-same-origin allow-popups allow-popups-to-escape-sandbox"});
     if(!draftPage)form.replaceChildren(createElement("h2",{},"下書きから削除した固定ページ"),createElement("p",{},"反映済みの内容を確認できます。次のデモ反映で掲載が終了します。"));
     preview.append(mode,frame);root.append(form,preview);renderFixedPreview();updateRoleControls();
   }
@@ -1350,7 +1368,7 @@
       doc.head.append(style);
       main.replaceChildren();const section=doc.createElement("section");section.style.cssText="padding:40px;max-width:900px;margin:auto;overflow-wrap:anywhere";
       const h=doc.createElement("h1");h.textContent=visible ? page.title : "この固定ページは掲載されていません";section.append(h);
-      if(visible)page.body.split("\n").forEach(line=>{const p=doc.createElement("p");p.textContent=line;p.style.whiteSpace="pre-wrap";section.append(p);});main.append(section);
+      if(visible) {appendPlainBody(doc,section,page.body);appendSourceMedia(doc,section,page);}main.append(section);
     }
     contentModel.head(doc,content.settings,{title:visible ? page.seoTitle || (page.template === "recruit" ? content.settings.title : page.title) : "未掲載の固定ページ",description:visible ? page.seoDescription || (page.template === "recruit" ? content.settings.description : "") : ""});
     iframe.srcdoc="<!doctype html>"+doc.documentElement.outerHTML;
@@ -1362,10 +1380,124 @@
     state.draft.pages.push(page);selectedPage=page.id;markDirty();renderFixedPages();
   }
 
+  function updateTypeOptions(prefix, items) {
+    const select=$("#"+prefix+"-type"); const current=select.value;
+    const entries=new Map(items.map(item=>[item.sourceType || "local",item.sourceTypeLabel || (prefix === "fixed" ? "デモ固定ページ" : "デモ記事")]));
+    const signature=JSON.stringify([...entries]);if(select.dataset.types===signature)return;
+    select.dataset.types=signature;select.replaceChildren(createElement("option",{value:""},"すべての種類"));
+    entries.forEach((label,value)=>select.append(createElement("option",{value},label)));
+    select.value=entries.has(current) ? current : "";
+  }
+  async function importSiteData() {
+    if(role === "viewer" || !importedSite || busy)return;
+    const known=new Set();
+    [state.draft,state.published,...state.history.map(h=>h.content)].forEach(content=>{
+      [...(content.importedIds || []),...(content.pages || []).map(p=>p.id),...(content.articles || []).map(p=>p.id)].forEach(id=>known.add(id));
+    });
+    const count=contentModel.mergeImport(state.draft,importedSite,[...known]);
+    markDirty();await saveDraft();
+    selectedArticle=selectedArticle || state.draft.articles[0]?.id;
+    if(view === "articles")renderArticles();else renderArticleItems();renderFixedPages();if(view === "terms")renderTerms();
+    toast(count + "件を下書きに追加しました。既存の編集内容は保持しています。");
+  }
+  function renderSourceFields(form,item,onChange) {
+    const url=contentModel.safeHttp(item.sourceUrl);
+    if(url){
+      const info=createElement("p",{className:"source-info"});
+      info.append(createElement("small",{},item.sourceTypeLabel || item.sourceType || "取得元"),createElement("br"),createElement("a",{href:url,target:"_blank",rel:"noopener noreferrer"},"元ページを開く"),createElement("small",{},item.sourcePath || new URL(url).pathname));form.append(info);
+    }
+    if(!item.images?.length)return;
+    const details=createElement("details",{className:"source-images"});details.append(createElement("summary",{},"画像（"+item.images.length+"件）"));
+    item.images.forEach((image,index)=>{
+      const urlId="image-"+item.id+"-"+index,altId=urlId+"-alt";
+      const address=createElement("input",{id:urlId,value:image.url || "",type:"url"});
+      const alt=createElement("input",{id:altId,value:image.alt || ""});
+      address.addEventListener("change",()=>{if(role === "viewer")return;const safe=contentModel.safeHttp(address.value);if(address.value && !safe){address.value=image.url || "";toast("画像はhttpまたはhttpsのURLを指定してください。");return;}image.url=safe;onChange();});
+      alt.addEventListener("input",()=>{if(role === "viewer")return;image.alt=alt.value;onChange();});
+      details.append(createElement("label",{for:urlId,className:"input-label"},"画像 "+(index+1)+" のURL"),address,createElement("label",{for:altId,className:"input-label"},"画像の説明"),alt);
+    });form.append(details);
+  }
+  function appendPlainBody(doc,root,text) {
+    let paragraph=[];
+    const append=(tag,value)=>{const node=doc.createElement(tag);node.textContent=value;node.style.whiteSpace="pre-wrap";root.append(node);};
+    const flush=()=>{if(paragraph.length)append("p",paragraph.join("\n"));paragraph=[];};
+    String(text || "").split("\n").forEach(line=>{
+      if(/^#{1,6}\s/.test(line)){flush();append("h2",line.replace(/^#{1,6}\s+/,""));}
+      else if(!line.trim())flush();
+      else paragraph.push(line);
+    });
+    flush();
+  }
+  function appendSourceMedia(doc,root,item) {
+    let extraImages;
+    (item.images || []).forEach((image,index)=>{
+      const url=contentModel.safeHttp(image.url);if(!url)return;
+      const figure=doc.createElement("figure");figure.style.cssText="margin:24px 0";
+      const img=doc.createElement("img");img.src=url;img.alt=image.alt || "";img.loading="lazy";img.referrerPolicy="no-referrer";img.style.cssText="max-width:100%;height:auto;display:block";figure.append(img);
+      if(index < 6)root.append(figure);else {if(!extraImages){extraImages=doc.createElement("details");const summary=doc.createElement("summary");summary.textContent="残りの画像を表示（"+(item.images.length-6)+"件）";extraImages.append(summary);root.append(extraImages);}extraImages.append(figure);}
+    });
+    const url=contentModel.safeHttp(item.sourceUrl);
+    if(url){const p=doc.createElement("p"),link=doc.createElement("a");link.href=url;link.target="_blank";link.rel="noopener noreferrer";link.dataset.sourceLink="";link.textContent="元ページを開く";p.append(link);root.append(p);}
+  }
+  function renderTermList() {
+    const mode=$("#term-mode").value,kind=$("#term-kind").value,content=state[mode];
+    const catalog=contentModel.catalog(content,kind),query=$("#term-search").value.trim();
+    const filtered=catalog.filter(term=>!query || term.name.includes(query));
+    $("#term-count").textContent=filtered.length+" / "+catalog.length+"件";
+    const root=$("#term-items");root.replaceChildren();
+    filtered.forEach(term=>{
+      const count=contentModel.termArticles(content,kind,term).length;
+      const item=button(term.name+"（"+count+"件）",()=>{selectedTerm=term.name;renderTerms();},"article-item"+(selectedTerm===term.name ? " active" : ""));root.append(item);
+    });
+  }
+  function renderTerms() {
+    const mode=$("#term-mode").value,kind=$("#term-kind").value,content=state[mode];
+    const catalog=contentModel.catalog(content,kind);if(!catalog.some(t=>t.name===selectedTerm))selectedTerm=catalog[0]?.name || "";
+    renderTermList();const root=$("#term-editor");root.replaceChildren();
+    const term=catalog.find(t=>t.name===selectedTerm);if(!term){root.append(createElement("p",{},"登録された分類はありません。記事でカテゴリー・タグを入力すると追加されます。"));return;}
+    const form=createElement("div",{className:"article-form"});form.append(createElement("h2",{},term.name));
+    form.append(createElement("p",{className:"muted"},mode === "draft" ? "分類ページの説明と検索表示用情報を編集できます。記事の所属は記事編集で設定します。" : "反映済みの分類ページです。"));
+    [["description","ページの説明本文"],["seoTitle","検索表示用タイトル"],["seoDescription","検索表示用説明"]].forEach(([key,label])=>{
+      const id="term-"+key,input=createElement(key === "seoTitle" ? "input" : "textarea",{id,value:term[key] || "",maxlength:"60000"});
+      input.disabled=mode === "published";input.addEventListener("input",()=>{
+        if(role === "viewer" || mode !== "draft")return;
+        const collection=contentModel.termCollection(state.draft,kind);
+        let target=collection.find(t=>kind === "archive" ? t.id===term.id : t.name===term.name);if(!target){target=clone(term);collection.push(target);}target[key]=input.value;if(kind === "archive" && key === "description")target.body=input.value;
+        markDirty();renderTermPreview();
+      });form.append(createElement("label",{for:id,className:"input-label"},label),input);
+    });
+    const sourceUrl=contentModel.safeHttp(term.sourceUrl);if(sourceUrl)form.append(createElement("a",{href:sourceUrl,target:"_blank",rel:"noopener noreferrer"},"元の分類ページを開く"));
+    const frame=createElement("iframe",{id:"term-preview",title:"カテゴリー・タグページのプレビュー",sandbox:"allow-same-origin allow-popups allow-popups-to-escape-sandbox"});
+    frame.addEventListener("load",()=>frame.contentDocument.addEventListener("click",event=>{
+      const link=event.target.closest("[data-article-id],[data-fixed-id],[data-term-name]");if(!link)return;event.preventDefault();
+      if(link.dataset.fixedId){selectedPage=link.dataset.fixedId;switchView("fixed");$("#fixed-mode").value=mode;renderFixedPreview();}
+      else if(link.dataset.termName){$("#term-kind").value=link.dataset.termKind;selectedTerm=link.dataset.termName;renderTerms();}
+      else {selectedArticle=link.dataset.articleId;articleMode=mode;articleRoute="detail";switchView("articles");}
+    }));root.append(form,frame);renderTermPreview();updateRoleControls();
+  }
+  function renderTermPreview() {
+    const frame=$("#term-preview");if(!frame)return;
+    const mode=$("#term-mode").value,kind=$("#term-kind").value,content=state[mode];
+    const term=contentModel.catalog(content,kind).find(t=>t.name===selectedTerm);if(!term)return;
+    const doc=source.cloneNode(true);applyFields(doc,content);const main=$("main",doc);main.replaceChildren();
+    const style=doc.createElement("style");style.textContent="main,footer{position:relative;background:#fff}main{padding:36px;overflow-wrap:anywhere}main p{line-height:1.9;white-space:pre-wrap}main h1{border-left:8px solid #ecdd6e;padding-left:18px}main a{color:#268342}.term-card{padding:20px 0;border-bottom:1px solid #ddd}@media(max-width:600px){main{padding:24px}}";doc.head.append(style);
+    const h=doc.createElement("h1");h.textContent=term.name;main.append(h);appendPlainBody(doc,main,term.description || "");
+    const articles=contentModel.termArticles(content,kind,term);
+    const count=doc.createElement("p");count.textContent=articles.length+"件の記事";main.append(count);
+    if(!articles.length){const empty=doc.createElement("p");empty.textContent="この分類に掲載する記事はまだありません。";main.append(empty);}
+    articles.forEach(article=>{const card=doc.createElement("section");card.className="term-card";const h2=doc.createElement("h2"),link=doc.createElement("a");link.href="#"+article.slug;link.dataset.articleId=article.id;link.textContent=article.title;h2.append(link);const p=doc.createElement("p");p.textContent=article.summary || "";card.append(h2,p);main.append(card);});
+    if(kind === "archive" && term.sourceType === "sitemap") {
+      const addHeading=text=>{const h=doc.createElement("h2");h.textContent=text;main.append(h);};
+      addHeading("固定ページ");content.pages.filter(p=>p.listed).forEach(page=>{const p=doc.createElement("p"),a=doc.createElement("a");a.textContent=page.title;a.href="#"+page.slug;a.dataset.fixedId=page.id;p.append(a);main.append(p);});
+      ["category","tag"].forEach(termKind=>{addHeading(termKind === "category" ? "カテゴリー" : "タグ");contentModel.catalog(content,termKind).forEach(t=>{const p=doc.createElement("p"),a=doc.createElement("a");a.textContent=t.name;a.href="#"+encodeURIComponent(t.name);a.dataset.termName=t.name;a.dataset.termKind=termKind;p.append(a);main.append(p);});});
+    }
+    appendSourceMedia(doc,main,term);contentModel.head(doc,content.settings,{title:term.seoTitle || term.name,description:term.seoDescription || term.description || ""});frame.srcdoc="<!doctype html>"+doc.documentElement.outerHTML;
+  }
+
   function updateRoleControls() {
     $$("input,textarea,button").forEach(target => {
       const publishAction = target.id === "confirm-publish" || target.id === "publish" || target.textContent.trim() === "デモに反映";
-      const navigation = target.matches("[data-view],[data-device],[data-preview],.article-item,.text-button") || /スマホで見る|PCで見る|採用ページの内容を直接編集|戻る/.test(target.textContent);
+      const navigation = target.matches("[data-browse],[data-view],[data-device],[data-preview],.article-item,.text-button") || /スマホで見る|PCで見る|採用ページの内容を直接編集|戻る/.test(target.textContent);
       const blocked = (publishAction && role !== "admin") || (role === "viewer" && !navigation);
       if (blocked && !target.disabled) {target.disabled=true;target.dataset.roleDisabled="true";}
       else if (!blocked && target.dataset.roleDisabled) {target.disabled=false;delete target.dataset.roleDisabled;}
@@ -1375,7 +1507,7 @@
   function guardRole(event) {
     const target=event.target.closest("input,textarea,select,button,[contenteditable]");if(!target)return;
     const publishAction=target.id === "confirm-publish" || target.id === "publish" || target.textContent.trim() === "デモに反映";
-    const navigation=target.matches("[data-view],[data-device],[data-preview],#role-select,#section-select,#taxonomy-mode,#fixed-mode,#fixed-template,[aria-label^='記事プレビュー'],.article-item,.text-button") || /スマホで見る|PCで見る|採用ページの内容を直接編集|戻る/.test(target.textContent);
+    const navigation=target.matches("[data-browse],[data-view],[data-device],[data-preview],#role-select,#section-select,#taxonomy-mode,#fixed-mode,#fixed-template,[aria-label^='記事プレビュー'],.article-item,.text-button") || /スマホで見る|PCで見る|採用ページの内容を直接編集|戻る/.test(target.textContent);
     const mutation=!navigation && (target.matches("input,textarea,[contenteditable]") || target.tagName === "BUTTON");
     if((publishAction && role !== "admin") || (mutation && role === "viewer")) {event.preventDefault();event.stopImmediatePropagation();if(event.type === "click")toast("現在のデモ権限では変更できません。");}
   }
@@ -1393,12 +1525,13 @@
     commitInlineEditors();
     view = value;
     $$("[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === value));
-    ["pages", "articles", "history", "settings", "fixed"].forEach((name) => { $(`#${name}-view`).hidden = name !== value; });
-    $("#view-title").textContent = { pages: "ページを編集", articles: "記事管理", history: "反映履歴", settings: "サイト共通・SEO", fixed: "固定ページ管理" }[value];
+    ["pages", "articles", "history", "settings", "fixed", "terms"].forEach((name) => { $(`#${name}-view`).hidden = name !== value; });
+    $("#view-title").textContent = { pages: "ページを編集", articles: "記事管理", history: "反映履歴", settings: "サイト共通・SEO", fixed: "固定ページ管理", terms: "カテゴリー・タグ" }[value];
     if (value === "articles") renderArticles();
     if (value === "history") renderHistory();
     if (value === "settings") renderSettings();
     if (value === "fixed") renderFixedPages();
+    if (value === "terms") renderTerms();
     requestAnimationFrame(fitPreviews);
   }
 
@@ -1413,6 +1546,8 @@
   }
 
   async function start() {
+    contentModel.complete(initial);
+    let hasSavedState = false;
     state = { version: 1, draft: clone(initial), published: clone(initial), history: [], savedAt: null, publishedAt: null };
     try {
       db = await openDatabase();
@@ -1423,11 +1558,25 @@
         });
         saved.history.forEach((entry) => { entry.content = model.completeContent(entry.content, initial); });
         state = saved;
+        hasSavedState = true;
       }
     } catch (error) {
       console.error("ブラウザ保存を開けませんでした", error);
       toast("ブラウザ保存を利用できません。編集後はJSONを書き出してください。");
     }
+    try {
+      const response=await fetch("imported-site.json",{cache:"no-cache"});
+      if(!response.ok)throw new Error("取得データがありません");
+      importedSite=await response.json();
+      if(!Array.isArray(importedSite.pages) || !Array.isArray(importedSite.articles))throw new Error("取得データ形式が異なります");
+      if(!hasSavedState) {contentModel.mergeImport(state.draft,importedSite);state.published=clone(state.draft);}
+      $("#import-status").textContent = "実サイト取得データ：固定ページ " + importedSite.pages.length + "件・記事 " + importedSite.articles.length + "件" + (hasSavedState ? "。追加すると未登録分を下書きへ取り込みます。" : "を読み込みました。");
+    } catch(error) {$("#import-status").textContent="実サイト取得データを読み込めませんでした。既存データで編集できます。";$("#import-site").hidden=true;}
+    $("#import-site").addEventListener("click", importSiteData);
+    ["article","fixed"].forEach(prefix=> {const render=prefix === "article" ? renderArticleItems : renderFixedPages;$("#"+prefix+"-search").addEventListener("input",render);$("#"+prefix+"-type").addEventListener("change",render);});
+    $("#term-kind").addEventListener("change",()=>{selectedTerm="";renderTerms();});
+    $("#term-mode").addEventListener("change",renderTerms);
+    $("#term-search").addEventListener("input",renderTermList);
     selectedArticle = state.draft.articles[0]?.id || null;
     $("#add-fixed").addEventListener("click", addFixedPage);
     $("#role-select").addEventListener("change", event => {commitInlineEditors();role=event.target.value;status();updateRoleControls();renderPagePreview();renderFields();if(view === "articles")renderArticles();updateRoleControls();});
@@ -1464,6 +1613,7 @@
     window.addEventListener("resize", fitPreviews);
     window.addEventListener("beforeunload", (event) => { if (dirty) { event.preventDefault(); event.returnValue = ""; } });
     renderFields(); renderPagePreview(); renderHistory(); status();
+    if(importedSite)switchView("fixed");
     requestAnimationFrame(fitPreviews);
   }
 
