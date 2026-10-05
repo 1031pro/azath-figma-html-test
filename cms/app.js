@@ -1,6 +1,7 @@
 "use strict";
 
 (() => {
+  const contentModel = typeof document === "undefined" ? require("./content-model.js") : window.CMS_CONTENT;
   const model = {
     safeUrl(value, baseUrl) {
       const text = String(value || "").trim();
@@ -19,7 +20,7 @@
       result.recruitButtons = content.recruitButtons === undefined
         ? defaults.recruitButtons.map((item) => ({ ...item, label: result.values[item.key] ?? item.label }))
         : structuredClone(content.recruitButtons);
-      return result;
+      return contentModel.complete(result);
     },
   };
   if (typeof document === "undefined") { module.exports = model; return; }
@@ -30,9 +31,11 @@
   const siteBase = new URL("site/", location.href).href;
   const fields = [];
   const groups = [];
-  const initial = { values: {}, images: {}, links: {}, recruitButtons: [], faqs: [], articles: [] };
+  const initial = { values: {}, images: {}, links: {}, recruitButtons: [], faqs: [], articles: [], settings: { ...contentModel.defaults }, pages: [{id:"recruit",title:"採用ページ",slug:"recruit",template:"recruit",body:"",listed:true,seoTitle:"",seoDescription:""}] };
   const buttons = [];
   let state;
+  let role = "admin";
+  let selectedPage = "recruit";
   let db;
   let dirty = false;
   let revision = 0;
@@ -44,6 +47,8 @@
   let device = "desktop";
   let articleMode = "draft";
   let articleRoute = "detail";
+  let taxonomyKind = "";
+  let taxonomyName = "";
   let pageScroll = 0;
   let toastTimer;
   let activeInline = null;
@@ -205,9 +210,10 @@
 
   function status() {
     $("#save-status").textContent = busy ? "保存しています…" : dirty ? "未保存の変更あり" : state.savedAt ? `保存済み ${formatTime(state.savedAt)}` : "元ページから開始";
-    $("#save").disabled = busy;
-    $("#publish").disabled = busy;
+    $("#save").disabled = busy || role === "viewer";
+    $("#publish").disabled = busy || role !== "admin";
     $$(".article-actions button").forEach((item) => { item.disabled = busy; });
+    updateRoleControls();
   }
 
   function markDirty() {
@@ -244,6 +250,7 @@
   }
 
   async function saveDraft() {
+    if (role === "viewer") return;
     if (busy) return;
     commitInlineEditors();
     if (!db) return toast("ブラウザ保存を利用できません。編集データを書き出してください。");
@@ -297,6 +304,8 @@
     });
     renderRecruitButtons(doc, content);
     renderFAQDocument(doc, content);
+    const recruit = content.pages.find(p => p.id === "recruit");
+    contentModel.head(doc, content.settings, {title:recruit?.seoTitle || content.settings.title,description:recruit?.seoDescription || content.settings.description});
   }
 
   function applyLink(node, link) {
@@ -386,6 +395,7 @@
   }
 
   function pageDocument(content) {
+    if (!content.pages.some(p => p.id === "recruit" && (previewMode === "draft" || p.listed))) return "<!doctype html><html lang=ja><head><meta name=robots content=noindex,nofollow><title>採用ページ</title></head><body><p>採用ページはこの版では掲載されていません。固定ページ管理または反映履歴を確認してください。</p></body></html>";
     const doc = source.cloneNode(true);
     applyFields(doc, content);
     return "<!doctype html>" + doc.documentElement.outerHTML;
@@ -398,7 +408,7 @@
   }
 
   function updatePreviewField(field) {
-    if (previewMode !== "draft") return;
+    if (previewMode !== "draft" || role === "viewer") return;
     const doc = $("#preview").contentDocument;
     const node = doc?.querySelector(`[data-cms-key="${field.key}"]`);
     if (!node) return;
@@ -426,6 +436,7 @@
 
   function renderFields() {
     const root = $("#fields");
+    if (!state.draft.pages.some(p => p.id === "recruit")) {root.replaceChildren();return;}
     root.replaceChildren();
     const group = groups.find((item) => item.id === selectedGroup);
     group.fields.forEach((field) => {
@@ -471,7 +482,7 @@
       root.append(wrap);
     });
     if (selectedGroup === "faq") renderFAQFields(root);
-    const readonly = previewMode === "published";
+    const readonly = previewMode === "published" || role === "viewer";
     $$("input,textarea,button", root).forEach((node) => { node.disabled = readonly; });
   }
 
@@ -499,7 +510,7 @@
   }
 
   function syncInline(node) {
-    if (!node?.isConnected || previewMode !== "draft") return;
+    if (!node?.isConnected || previewMode !== "draft" || role === "viewer") return;
     const value = inlineText(node);
     if (node.dataset.inlineField) {
       const key = node.dataset.inlineField;
@@ -521,6 +532,7 @@
   }
 
   function commitInlineEditors() {
+    if (role === "viewer") return;
     const editor = activeInline;
     if (!editor) return;
     // フォーカス移動でIMEの確定イベントを発生させ、入力DOMから値を確定する。
@@ -579,7 +591,7 @@
   }
 
   function prepareInlineElements(doc) {
-    if (previewMode !== "draft") return;
+    if (previewMode !== "draft" || role === "viewer") return;
     fields.filter((field) => field.type === "text").forEach((field) => {
       const node = doc.querySelector(`[data-cms-key="${field.key}"]`);
       if (!node || node.dataset.cmsButton) return;
@@ -629,7 +641,7 @@
 
   function attachInlineEditor(doc) {
     activeInline = null;
-    if (previewMode === "draft") {
+    if (previewMode === "draft" && role !== "viewer") {
       const style = doc.createElement("style");
       style.dataset.cmsUi = "style";
       style.textContent = `
@@ -664,7 +676,7 @@
       const image = event.target.closest("img[data-cms-key]");
       const buttonNode = event.target.closest("[data-cms-button]");
       if (event.target.closest("a,button,summary")) event.preventDefault();
-      if (previewMode !== "draft") return;
+      if (previewMode !== "draft" || role === "viewer") return;
       closeInlinePanel(doc);
       if (editable) {
         const field = fields.find((item) => item.key === editable.dataset.inlineField);
@@ -965,11 +977,13 @@
       const articleChanged = draft.articles.filter((article) => JSON.stringify(article) !== JSON.stringify(published.articles.find((item) => item.id === article.id))).length;
     const removedArticles = published.articles.filter((article) => !draft.articles.some((item) => item.id === article.id)).length;
     const buttonsChanged = JSON.stringify(draft.recruitButtons) !== JSON.stringify(published.recruitButtons);
+    const settingsChanged = JSON.stringify(draft.settings) !== JSON.stringify(published.settings);
     const linksChanged = Object.keys(draft.links).filter((key) => JSON.stringify(draft.links[key]) !== JSON.stringify(published.links[key])).length;
-    return { textCount, imageCount, faqChanged, articleChanged, removedArticles, buttonsChanged, linksChanged };
+    return { textCount, imageCount, faqChanged, articleChanged, removedArticles, buttonsChanged, linksChanged, settingsChanged, pagesChanged: JSON.stringify(draft.pages) !== JSON.stringify(published.pages) };
   }
 
   function openPublish() {
+    if (role !== "admin") return toast("デモ反映は管理者のみ操作できます。");
     commitInlineEditors();
     const changes = changesSummary();
     const root = $("#changes");
@@ -979,17 +993,23 @@
     root.append(createElement("p", {}, changes.faqChanged ? `FAQを更新（${state.draft.faqs.length}件）` : "FAQの変更なし"));
     root.append(createElement("p", {}, `記事の追加・更新 ${changes.articleChanged}件 / 削除 ${changes.removedArticles}件`));
     root.append(createElement("p", {}, `掲載設定の記事 ${state.draft.articles.filter((article) => article.listed).length}件を読者向け一覧に表示します。`));
+    root.append(createElement("p", {}, `サイト共通・SEO設定：${changes.settingsChanged ? "変更あり" : "変更なし"}`));
+    root.append(createElement("p", {}, `固定ページ：${changes.pagesChanged ? "変更あり" : "変更なし"} / 掲載 ${state.draft.pages.filter(p => p.listed).length}件`));
     $("#publish-dialog").showModal();
   }
 
   async function publish() {
+    if (role !== "admin") return toast("デモ反映は管理者のみ操作できます。");
     if (busy) return;
     commitInlineEditors();
     if (!db) return toast("ブラウザ保存を利用できないため反映できません。");
+    const listedPages = state.draft.pages.filter(p => p.listed);
+    if (listedPages.some(p => !p.title.trim() || !p.slug.trim()) || new Set(listedPages.map(p => p.slug)).size !== listedPages.length) return toast("掲載する固定ページのタイトル・URL名と重複を確認してください。");
     const listed = state.draft.articles.filter((article) => article.listed);
     const invalid = listed.find((article) => !article.title.trim() || !article.body.trim() || !article.slug.trim());
     if (invalid) { toast("掲載する記事のタイトル・URL名・本文を入力してください。"); return; }
     if (new Set(listed.map((article) => article.slug)).size !== listed.length) { toast("掲載する記事のURL名が重複しています。"); return; }
+    if (contentModel.duplicateSlugs([...listedPages, ...listed])) return toast("固定ページと記事を含め、掲載するURL名が重複しています。");
     busy = true; status();
     $("#confirm-publish").disabled = true;
     const savedRevision = revision;
@@ -1011,7 +1031,7 @@
       if (revision === savedRevision) dirty = false;
       $("#publish-dialog").close();
       if (previewMode === "published") renderPagePreview();
-      renderArticleItems(); renderArticlePreview(); renderHistory();
+      renderArticleItems(); renderArticlePreview(); renderHistory(); renderSettings(); renderFixedPages();
       toast(revision === savedRevision
         ? "このブラウザのデモ表示に反映しました。"
         : "デモ表示に反映しました。処理中に追加した変更は下書きに残っています。");
@@ -1044,7 +1064,7 @@
         state.draft = model.completeContent(entry.content, initial);
         activeInline = null;
         selectedArticle = state.draft.articles[0]?.id || null;
-        markDirty(); renderFields(); renderPagePreview(); renderArticles();
+        markDirty(); renderFields(); renderPagePreview(); renderArticles(); renderSettings(); renderFixedPages();
         await saveDraft();
       }));
       root.append(card);
@@ -1052,10 +1072,12 @@
   }
 
   function newArticle(sample = false) {
+    if (role === "viewer") return;
     const article = {
       id: crypto.randomUUID(), title: sample ? "院内見学の前に確認したいこと" : "", slug: `article-${Date.now()}`,
       summary: sample ? "見学前に整理しておくと役立つ質問を紹介します。" : "",
       body: sample ? "院内見学では、職場の雰囲気やスタッフの動きを実際に確認できます。\n\n## 先に質問を整理する\n\n研修の進め方、勤務時間、配属先など、知りたいことをメモしておきましょう。\n\n## 現場の様子を見る\n\n患者さんへの説明やスタッフ同士のやり取りを見て、自分に合う職場か考えてみましょう。\n\n※操作確認のための固定サンプルです。掲載前に内容を確認してください。" : "",
+      category: "", tags: [], seoTitle: "", seoDescription: "",
       author: "採用担当", date: new Date().toLocaleDateString("sv-SE"), listed: false,
       createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), sample,
     };
@@ -1070,21 +1092,25 @@
     const root = $("#article-items");
     root.replaceChildren();
     if (!state.draft.articles.length) root.append(createElement("p", { className: "muted" }, "新規作成して、タイトルと本文を入力してください。"));
-    state.draft.articles.forEach((article) => {
+    contentModel.union(state.draft.articles, state.published.articles).forEach((article) => {
       const item = button("", () => { selectedArticle = article.id; articleRoute = "detail"; renderArticles(); }, `article-item${selectedArticle === article.id ? " active" : ""}`);
       item.append(createElement("strong", {}, article.title || "タイトル未入力"));
       const live = state.published.articles.find((entry) => entry.id === article.id);
-      const label = !live ? "未反映" : JSON.stringify(live) !== JSON.stringify(article) ? "変更あり" : "反映済み";
+      const label = !state.draft.articles.some(item => item.id === article.id) ? "次の反映で削除" : !live ? "未反映" : JSON.stringify(live) !== JSON.stringify(article) ? "変更あり" : "反映済み";
       item.append(createElement("small", {}, `${article.listed ? "掲載する" : "下書き"} · ${label}`));
+      item.append(createElement("small", {}, `${article.category || "未分類"} / ${(article.tags || []).join("・") || "タグなし"}`));
       root.append(item);
     });
+    renderTaxonomy();
   }
 
   function renderArticles() {
     renderArticleItems();
     const root = $("#article-editor");
     root.replaceChildren();
-    const article = state.draft.articles.find((item) => item.id === selectedArticle);
+    const draftArticle = state.draft.articles.find((item) => item.id === selectedArticle);
+    const article = draftArticle || clone(state.published.articles.find(item => item.id === selectedArticle) || null);
+    if (article && !draftArticle) articleMode = "published";
     if (!article) {
       const empty = createElement("div", { className: "article-form empty-state" });
       empty.append(createElement("h2", {}, "最初の記事をつくる"), createElement("p", {}, "自分で書き始めるか、操作確認用の固定サンプルを追加できます。"));
@@ -1097,18 +1123,33 @@
     const form = createElement("div", { className: "article-form" });
     form.append(createElement("span", { className: "eyebrow" }, "ARTICLE EDITOR"), createElement("h2", {}, "記事を編集"));
     if (article.sample) form.append(createElement("p", { className: "sample-note" }, "操作確認用の固定サンプルです。AIで生成した文章ではありません。"));
-    [["title", "タイトル", "input"], ["slug", "URL名（半角英数字・ハイフン）", "input"], ["summary", "概要", "textarea"], ["body", "本文（行頭の ## は見出しになります）", "textarea"], ["author", "著者", "input"], ["date", "記事の日付", "input"]].forEach(([key, label, tag]) => {
+    [["title", "タイトル", "input"], ["slug", "URL名（半角英数字・ハイフン）", "input"], ["summary", "概要", "textarea"], ["body", "本文（行頭の ## は見出しになります）", "textarea"], ["author", "著者", "input"], ["date", "記事の日付", "input"], ["category", "カテゴリー", "input"], ["tags", "タグ（カンマ区切りで複数指定）", "input"], ["seoTitle", "検索表示用タイトル（空欄なら記事タイトル）", "input"], ["seoDescription", "検索表示用説明（空欄なら概要）", "textarea"]].forEach(([key, label, tag]) => {
       const id = `article-${key}`;
-      const control = createElement(tag, { id, value: article[key], className: key === "summary" ? "summary-input" : "", maxlength: key === "body" ? "60000" : "1000" });
+      const control = createElement(tag, { id, value: key === "tags" ? (article.tags || []).join(", ") : article[key], className: key === "summary" ? "summary-input" : "", maxlength: key === "body" ? "60000" : "1000" });
       if (key === "date") control.type = "date";
       control.addEventListener("input", () => {
-        article[key] = key === "slug" ? control.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() : control.value;
+        article[key] = key === "slug" ? control.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() : key === "tags" ? contentModel.tags(control.value) : key === "category" ? control.value.trim() : control.value;
         if (key === "slug") control.value = article[key];
         article.updatedAt = new Date().toISOString();
         markDirty(); renderArticleItems(); renderArticlePreview();
       });
       form.append(createElement("label", { for: id, className: "input-label" }, label), control);
     });
+    const suggestions = createElement("div", {className:"tag-suggestions"});
+    suggestions.append(createElement("p", {className:"muted"}, "本文に2回以上出てくる語からタグ候補を作ります。候補を選ぶと既存のタグに追加されます。"));
+    const candidates = createElement("div", {"aria-live":"polite"});
+    suggestions.append(button("本文からタグ候補を抽出", () => {
+      if (role === "viewer") return;
+      candidates.replaceChildren();
+      const found = contentModel.suggestTags(article.body, article.tags);
+      if (!found.length) candidates.append(createElement("p", {}, "追加できる頻出語はありません。タグは手入力もできます。"));
+      found.forEach(({tag,count}) => candidates.append(button(tag + "（" + count + "回）を追加", event => {
+        if(role === "viewer")return;
+        article.tags = contentModel.tags([...article.tags,tag]); article.updatedAt = new Date().toISOString();
+        $("#article-tags").value = article.tags.join(", "); event.currentTarget.disabled=true;event.currentTarget.textContent=tag + " 追加済み";
+        markDirty();renderArticleItems();renderArticlePreview();
+      })));
+    }),candidates);form.append(suggestions);
     const listing = createElement("label", { className: "listing-option" });
     const checkbox = createElement("input", { type: "checkbox", checked: article.listed });
     checkbox.addEventListener("change", () => { article.listed = checkbox.checked; article.updatedAt = new Date().toISOString(); markDirty(); renderArticleItems(); renderArticlePreview(); });
@@ -1118,7 +1159,6 @@
     controls.append(button("下書き保存", saveDraft), button("デモに反映", openPublish, "btn small primary"), button("削除", async () => {
       if (!await confirmAction("この記事を下書きから削除しますか？反映済みの記事は次の反映まで残ります。", "下書きから削除")) return;
       state.draft.articles = state.draft.articles.filter((item) => item.id !== article.id);
-      selectedArticle = state.draft.articles[0]?.id || null;
       markDirty(); renderArticles();
     }));
     $$("button", controls).forEach((item) => { item.disabled = busy; });
@@ -1131,7 +1171,7 @@
     mode.value = articleMode;
     mode.addEventListener("change", () => { articleMode = mode.value; renderArticlePreview(); });
     const route = createElement("select", { "aria-label": "記事プレビューの表示" });
-    [["detail", "記事詳細"], ["list", "記事一覧"]].forEach(([value, label]) => route.append(createElement("option", { value }, label)));
+    [["detail", "記事詳細"], ["list", "記事一覧"], ["taxonomy", "カテゴリー・タグ別一覧"]].forEach(([value, label]) => route.append(createElement("option", { value }, label)));
     route.value = articleRoute;
     route.addEventListener("change", () => { articleRoute = route.value; renderArticlePreview(); });
     toolbar.append(mode, route, button(device === "mobile" ? "PCで見る" : "スマホで見る", () => {
@@ -1150,20 +1190,23 @@
         if (!link) return;
         event.preventDefault();
         if (link.dataset.articleId) { selectedArticle = link.dataset.articleId; articleRoute = "detail"; renderArticles(); }
+        else if (link.dataset.taxonomyKind) { taxonomyKind = link.dataset.taxonomyKind; taxonomyName = link.dataset.taxonomyName; articleRoute = "taxonomy"; renderArticles(); }
         else if (link.dataset.articleList !== undefined) { articleRoute = "list"; renderArticles(); }
         else toast("記事プレビューでは記事一覧・詳細の移動を確認できます。");
       });
     });
     holder.append(iframe); canvas.append(holder); preview.append(toolbar, canvas);
+    if (!draftArticle) form.replaceChildren(createElement("h2", {}, "下書きから削除した記事"), createElement("p", {}, "反映済みの内容を確認できます。次のデモ反映で掲載が終了します。"));
     root.append(form, preview);
     renderArticlePreview();
+    updateRoleControls();
     requestAnimationFrame(fitPreviews);
   }
 
   function renderArticlePreview() {
     const iframe = $("#article-preview-frame");
     if (!iframe) return;
-    const routeKey = `${articleMode}:${articleRoute}:${selectedArticle}`;
+    const routeKey = `${articleMode}:${articleRoute}:${selectedArticle}:${taxonomyKind}:${taxonomyName}`;
     iframe.dataset.scroll = iframe.dataset.route === routeKey ? iframe.contentWindow?.scrollY || 0 : 0;
     iframe.dataset.route = routeKey;
     const content = state[articleMode];
@@ -1181,9 +1224,15 @@
     const append = (tag, text, parent = root) => {
       const node = doc.createElement(tag); node.textContent = text; parent.append(node); return node;
     };
-    if (articleRoute === "list") {
-      append("h1", "採用コラム・お知らせ");
-      const listed = content.articles.filter((item) => item.listed);
+    const taxonomyLinks = (item, parent) => {
+      const values = [["category", item.category || "未分類"], ...(item.tags || []).map(tag => ["tag", tag])];
+      values.forEach(([kind, name]) => { const a = append("a", (kind === "tag" ? "#" : "") + name, parent); a.href = "#" + kind + "-" + encodeURIComponent(name); a.dataset.taxonomyKind = kind; a.dataset.taxonomyName = name; a.style.marginRight = "14px"; });
+    };
+    if (articleRoute !== "detail") {
+      append("h1", articleRoute === "taxonomy" && taxonomyKind ? taxonomyName + "の記事" : "採用コラム・お知らせ");
+      const nav = append("nav", ""); nav.setAttribute("aria-label", "記事の分類");
+      ["category", "tag"].forEach(kind => contentModel.taxonomy(content.articles.filter(a => a.listed), kind).forEach((items, name) => { const a = append("a", (kind === "tag" ? "#" : "") + name + " (" + items.length + ")", nav); a.href = "#" + kind + "-" + encodeURIComponent(name); a.dataset.taxonomyKind = kind; a.dataset.taxonomyName = name; a.style.marginRight = "14px"; }));
+      const listed = contentModel.filter(content.articles, articleRoute === "taxonomy" ? taxonomyKind : "", taxonomyName);
       if (!listed.length) append("p", "掲載する記事はまだありません。");
       listed.forEach((item) => {
         const card = doc.createElement("div"); card.className = "reader-card";
@@ -1191,10 +1240,12 @@
         link.href = `#${item.slug}`; link.dataset.articleId = item.id;
         append("small", `${item.date} / ${item.author}`, card);
         append("p", item.summary, card);
+        taxonomyLinks(item, card);
         root.append(card);
       });
     } else if (article && (articleMode === "draft" || article.listed)) {
       append("h1", article.title || "タイトル未入力");
+      taxonomyLinks(article, append("nav", ""));
       const meta = append("p", `${article.date} / ${article.author}`); meta.className = "meta";
       const lead = append("p", article.summary); lead.className = "lead";
       let paragraph = [];
@@ -1216,8 +1267,117 @@
     }
     const back = append("a", "記事一覧へ"); back.href = "#articles"; back.dataset.articleList = "";
     main.append(root);
-    doc.title = articleRoute === "list" ? "採用コラム・お知らせ" : article?.title || "記事プレビュー";
+    const shown = article && (articleMode === "draft" || article.listed);
+    contentModel.head(doc, content.settings, articleRoute === "detail" ? { title: shown ? article.seoTitle || article.title : "未掲載の記事", description: shown ? article.seoDescription || article.summary : "", type: "article" } : { title: articleRoute === "taxonomy" && taxonomyKind ? taxonomyName + "の記事" : "採用コラム・お知らせ", description: "" });
     iframe.srcdoc = "<!doctype html>" + doc.documentElement.outerHTML;
+  }
+
+
+  function renderTaxonomy() {
+    const root = $("#taxonomy-items"); root.replaceChildren();
+    const mode = $("#taxonomy-mode").value;
+    const articles = state[mode].articles.filter(a => mode === "draft" || a.listed);
+    ["category", "tag"].forEach(kind => {
+      root.append(createElement("h3", {}, kind === "category" ? "カテゴリー" : "タグ"));
+      const groups = contentModel.taxonomy(articles, kind);
+      if (!groups.size) root.append(createElement("p", {className:"muted"}, "登録はありません。"));
+      groups.forEach((items, name) => {
+        const detail = createElement("details", {className:"taxonomy-group"});
+        detail.append(createElement("summary", {}, name + "（" + items.length + "件）"));
+        items.forEach(a => detail.append(button(a.title || "タイトル未入力", () => {
+          selectedArticle = a.id; articleMode = mode; articleRoute = "detail"; renderArticles();
+        }, "text-button")));
+        root.append(detail);
+      });
+    });
+  }
+
+  function renderSettings() {
+    const root = $("#settings-fields"); root.replaceChildren();
+    [["siteName", "サイト名（記事と固定ページで共通）"], ["title", "採用ページの検索表示用タイトル"], ["description", "採用ページの検索表示用説明"]].forEach(([key, label]) => {
+      const id = "site-" + key;
+      const input = createElement(key === "description" ? "textarea" : "input", {id, value:state.draft.settings[key], maxlength:"1000"});
+      input.addEventListener("input", () => { state.draft.settings[key] = input.value; markDirty(); renderSeoSummary(); renderPagePreview(); renderArticlePreview(); });
+      root.append(createElement("label", {for:id,className:"input-label"}, label), input);
+    });
+    renderSeoSummary();
+    updateRoleControls();
+  }
+  function renderSeoSummary() {
+    const root = $("#seo-summary"); root.replaceChildren();
+    ["draft", "published"].forEach(mode => {
+      const settings = state[mode].settings;
+      const card = createElement("div", {className:"seo-card"});
+      card.append(createElement("h3", {}, mode === "draft" ? "編集中" : "反映済み"), createElement("strong", {}, settings.title), createElement("p", {}, settings.description || "説明は未入力です。"), createElement("small", {}, "サイト名：" + settings.siteName));
+      root.append(card);
+    });
+  }
+
+
+  function renderFixedPages() {
+    const root = $("#fixed-editor"); root.replaceChildren();
+    const list = $("#fixed-items"); list.replaceChildren();
+    contentModel.union(state.draft.pages, state.published.pages).forEach(page => list.append(button(page.title || "無題の固定ページ", () => {selectedPage=page.id;renderFixedPages();}, "article-item")));
+    const draftPage = state.draft.pages.find(p => p.id === selectedPage);
+    const page = draftPage || clone(state.published.pages.find(p => p.id === selectedPage) || null);
+    if (!page) { root.append(createElement("p", {}, "固定ページを追加、または一覧から選択してください。")); return; }
+    const form = createElement("div", {className:"article-form"});
+    form.append(createElement("h2", {}, page.template === "recruit" ? "採用ページ" : "固定ページを編集"));
+    [["title","ページ名"],["slug","URL名（半角英数字・ハイフン）"],["body","本文"],["seoTitle","検索表示用タイトル"],["seoDescription","検索表示用説明"]].filter(([key]) => page.template !== "recruit" || key !== "body").forEach(([key,label]) => {
+      const id="fixed-"+key; const input=createElement(key === "body" || key === "seoDescription" ? "textarea" : "input", {id,value:page[key] || "",maxlength:key === "body" ? "60000" : "1000"});
+      input.addEventListener("input", () => {if(role === "viewer")return;page[key]=key === "slug" ? input.value.replace(/[^a-zA-Z0-9-]/g, "").toLowerCase() : input.value;markDirty();renderFixedPreview();});
+      form.append(createElement("label", {for:id,className:"input-label"},label),input);
+    });
+    const check=createElement("input", {type:"checkbox",checked:page.listed});check.addEventListener("change",()=>{if(role === "viewer")return;page.listed=check.checked;markDirty();renderFixedPreview();});
+    const label=createElement("label",{className:"listing-option"},"次の反映で掲載する");label.prepend(check);form.append(label);
+    if(page.template === "recruit") form.append(button("採用ページの内容を直接編集",()=>switchView("pages")));
+    form.append(button("固定ページを削除",async()=>{if(role === "viewer")return;if(!await confirmAction("固定ページを下書きから削除しますか？反映済み表示は次の反映まで残ります。","削除"))return;if(role === "viewer")return;state.draft.pages=state.draft.pages.filter(p=>p.id!==page.id);markDirty();renderFixedPages();}));
+    const preview=createElement("div",{className:"article-form"});
+    const mode=createElement("select",{id:"fixed-mode","aria-label":"固定ページプレビューの版"});mode.append(createElement("option",{value:"draft"},"編集中"),createElement("option",{value:"published"},"反映済み"));if(!draftPage)mode.value="published";mode.addEventListener("change",renderFixedPreview);
+    const frame=createElement("iframe",{id:"fixed-preview",title:"固定ページプレビュー",sandbox:"allow-same-origin"});
+    if(!draftPage)form.replaceChildren(createElement("h2",{},"下書きから削除した固定ページ"),createElement("p",{},"反映済みの内容を確認できます。次のデモ反映で掲載が終了します。"));
+    preview.append(mode,frame);root.append(form,preview);renderFixedPreview();updateRoleControls();
+  }
+  function renderFixedPreview() {
+    const iframe=$("#fixed-preview");if(!iframe)return;
+    const content=state[$("#fixed-mode").value];const page=content.pages.find(p=>p.id===selectedPage);
+    const doc=source.cloneNode(true);applyFields(doc,content);
+    const main=$("main",doc);
+    const visible=page && ($("#fixed-mode").value === "draft" || page.listed);
+    if(!visible || page.template !== "recruit") {
+      const style=doc.createElement("style");
+      style.textContent="main,footer{position:relative;background:#fff}main h1{font-size:32px;line-height:1.5;border-left:8px solid #ecdd6e;padding-left:20px;overflow-wrap:anywhere}main p{line-height:2;margin:24px 0}@media(max-width:700px){main h1{font-size:25px}main>section{padding:30px 22px 60px!important}}";
+      doc.head.append(style);
+      main.replaceChildren();const section=doc.createElement("section");section.style.cssText="padding:40px;max-width:900px;margin:auto;overflow-wrap:anywhere";
+      const h=doc.createElement("h1");h.textContent=visible ? page.title : "この固定ページは掲載されていません";section.append(h);
+      if(visible)page.body.split("\n").forEach(line=>{const p=doc.createElement("p");p.textContent=line;p.style.whiteSpace="pre-wrap";section.append(p);});main.append(section);
+    }
+    contentModel.head(doc,content.settings,{title:visible ? page.seoTitle || (page.template === "recruit" ? content.settings.title : page.title) : "未掲載の固定ページ",description:visible ? page.seoDescription || (page.template === "recruit" ? content.settings.description : "") : ""});
+    iframe.srcdoc="<!doctype html>"+doc.documentElement.outerHTML;
+  }
+  function addFixedPage() {
+    if(role === "viewer")return;
+    const template="standard";
+    const page={id:crypto.randomUUID(),title:"新しい固定ページ",slug:"page-"+Date.now(),template,body:"",listed:false,seoTitle:"",seoDescription:""};
+    state.draft.pages.push(page);selectedPage=page.id;markDirty();renderFixedPages();
+  }
+
+  function updateRoleControls() {
+    $$("input,textarea,button").forEach(target => {
+      const publishAction = target.id === "confirm-publish" || target.id === "publish" || target.textContent.trim() === "デモに反映";
+      const navigation = target.matches("[data-view],[data-device],[data-preview],.article-item,.text-button") || /スマホで見る|PCで見る|採用ページの内容を直接編集|戻る/.test(target.textContent);
+      const blocked = (publishAction && role !== "admin") || (role === "viewer" && !navigation);
+      if (blocked && !target.disabled) {target.disabled=true;target.dataset.roleDisabled="true";}
+      else if (!blocked && target.dataset.roleDisabled) {target.disabled=false;delete target.dataset.roleDisabled;}
+    });
+  }
+
+  function guardRole(event) {
+    const target=event.target.closest("input,textarea,select,button,[contenteditable]");if(!target)return;
+    const publishAction=target.id === "confirm-publish" || target.id === "publish" || target.textContent.trim() === "デモに反映";
+    const navigation=target.matches("[data-view],[data-device],[data-preview],#role-select,#section-select,#taxonomy-mode,#fixed-mode,#fixed-template,[aria-label^='記事プレビュー'],.article-item,.text-button") || /スマホで見る|PCで見る|採用ページの内容を直接編集|戻る/.test(target.textContent);
+    const mutation=!navigation && (target.matches("input,textarea,[contenteditable]") || target.tagName === "BUTTON");
+    if((publishAction && role !== "admin") || (mutation && role === "viewer")) {event.preventDefault();event.stopImmediatePropagation();if(event.type === "click")toast("現在のデモ権限では変更できません。");}
   }
 
   function setDevice(value) {
@@ -1229,13 +1389,16 @@
   }
 
   function switchView(value) {
+    if(value === "pages" && !state.draft.pages.some(p => p.id === "recruit")) {toast("採用ページは削除されています。反映履歴から復元できます。");value="fixed";}
     commitInlineEditors();
     view = value;
     $$("[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === value));
-    ["pages", "articles", "history"].forEach((name) => { $(`#${name}-view`).hidden = name !== value; });
-    $("#view-title").textContent = { pages: "ページを編集", articles: "記事をつくる", history: "反映履歴" }[value];
+    ["pages", "articles", "history", "settings", "fixed"].forEach((name) => { $(`#${name}-view`).hidden = name !== value; });
+    $("#view-title").textContent = { pages: "ページを編集", articles: "記事をつくる", history: "反映履歴", settings: "サイト共通・SEO", fixed: "固定ページ管理" }[value];
     if (value === "articles") renderArticles();
     if (value === "history") renderHistory();
+    if (value === "settings") renderSettings();
+    if (value === "fixed") renderFixedPages();
     requestAnimationFrame(fitPreviews);
   }
 
@@ -1266,6 +1429,10 @@
       toast("ブラウザ保存を利用できません。編集後はJSONを書き出してください。");
     }
     selectedArticle = state.draft.articles[0]?.id || null;
+    $("#add-fixed").addEventListener("click", addFixedPage);
+    $("#role-select").addEventListener("change", event => {commitInlineEditors();role=event.target.value;status();updateRoleControls();renderPagePreview();renderFields();if(view === "articles")renderArticles();updateRoleControls();});
+    new MutationObserver(updateRoleControls).observe(document.body,{childList:true,subtree:true});
+    ["click","beforeinput","input","change"].forEach(type => document.addEventListener(type,guardRole,true));
     groups.forEach((group) => $("#section-select").append(createElement("option", { value: group.id }, group.label)));
     $("#section-select").value = selectedGroup;
     $("#section-select").addEventListener("change", (event) => selectGroup(event.target.value, null, true));
@@ -1285,6 +1452,7 @@
     $("#cancel-publish").addEventListener("click", () => $("#publish-dialog").close());
     $("#confirm-publish").addEventListener("click", publish);
     $("#export-data").addEventListener("click", exportData);
+    $("#taxonomy-mode").addEventListener("change", renderTaxonomy);
     $("#add-article").addEventListener("click", () => newArticle());
     $("#preview").addEventListener("load", () => {
       $("#preview").contentWindow.scrollTo(0, pageScroll);
