@@ -1113,7 +1113,7 @@
     if (article && !draftArticle) articleMode = "published";
     if (!article) {
       const empty = createElement("div", { className: "article-form empty-state" });
-      empty.append(createElement("h2", {}, "最初の記事をつくる"), createElement("p", {}, "自分で書き始めるか、操作確認用の固定サンプルを追加できます。"));
+      empty.append(createElement("h2", {}, "記事がありません"), createElement("p", {}, "新規作成、またはサンプルを追加してください。"));
       const row = createElement("div", { className: "empty-actions" });
       row.append(button("＋ 記事を新規作成", () => newArticle()), button("固定サンプルを追加", () => newArticle(true)));
       empty.append(row);
@@ -1121,8 +1121,8 @@
       return;
     }
     const form = createElement("div", { className: "article-form" });
-    form.append(createElement("span", { className: "eyebrow" }, "ARTICLE EDITOR"), createElement("h2", {}, "記事を編集"));
-    if (article.sample) form.append(createElement("p", { className: "sample-note" }, "操作確認用の固定サンプルです。AIで生成した文章ではありません。"));
+    form.append(createElement("h2", {}, "記事を編集"));
+    if (article.sample) form.append(createElement("p", { className: "sample-note" }, "操作確認用のサンプルです。"));
     [["title", "タイトル", "input"], ["slug", "URL名（半角英数字・ハイフン）", "input"], ["summary", "概要", "textarea"], ["body", "本文（行頭の ## は見出しになります）", "textarea"], ["author", "著者", "input"], ["date", "記事の日付", "input"], ["category", "カテゴリー", "input"], ["tags", "タグ（カンマ区切りで複数指定）", "input"], ["seoTitle", "検索表示用タイトル（空欄なら記事タイトル）", "input"], ["seoDescription", "検索表示用説明（空欄なら概要）", "textarea"]].forEach(([key, label, tag]) => {
       const id = `article-${key}`;
       const control = createElement(tag, { id, value: key === "tags" ? (article.tags || []).join(", ") : article[key], className: key === "summary" ? "summary-input" : "", maxlength: key === "body" ? "60000" : "1000" });
@@ -1394,7 +1394,7 @@
     view = value;
     $$("[data-view]").forEach((item) => item.classList.toggle("active", item.dataset.view === value));
     ["pages", "articles", "history", "settings", "fixed"].forEach((name) => { $(`#${name}-view`).hidden = name !== value; });
-    $("#view-title").textContent = { pages: "ページを編集", articles: "記事をつくる", history: "反映履歴", settings: "サイト共通・SEO", fixed: "固定ページ管理" }[value];
+    $("#view-title").textContent = { pages: "ページを編集", articles: "記事管理", history: "反映履歴", settings: "サイト共通・SEO", fixed: "固定ページ管理" }[value];
     if (value === "articles") renderArticles();
     if (value === "history") renderHistory();
     if (value === "settings") renderSettings();
