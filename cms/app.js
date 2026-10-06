@@ -54,6 +54,7 @@
   let pageScroll = 0;
   let toastTimer;
   let activeInline = null;
+  let activeReaderEditor = null;
 
   // 元ページのスクリプトはプレビューで動かさず、編集対象を親画面で扱う。
   $$("script, dialog, .back-top", source).forEach((node) => node.remove());
@@ -535,6 +536,7 @@
 
   function commitInlineEditors() {
     if (role === "viewer") return;
+    if(activeReaderEditor){const reader=activeReaderEditor;reader.node.blur();reader.commit();activeReaderEditor=null;}
     const editor = activeInline;
     if (!editor) return;
     // フォーカス移動でIMEの確定イベントを発生させ、入力DOMから値を確定する。
@@ -1174,7 +1176,7 @@
     form.append(controls);
     const preview = createElement("div", { className: "article-reader" });
     const toolbar = createElement("div", { className: "article-reader-toolbar" });
-    toolbar.append(createElement("strong", {}, "読者向けプレビュー"));
+    toolbar.append(createElement("strong", {}, "文章をクリックして編集・画像をクリックして設定"));
     const mode = createElement("select", { "aria-label": "記事プレビューの版" });
     [["draft", "編集中"], ["published", "反映済み"]].forEach(([value, label]) => mode.append(createElement("option", { value }, label)));
     mode.value = articleMode;
@@ -1194,9 +1196,10 @@
     iframe.addEventListener("load", () => {
       iframe.contentWindow.scrollTo(0, Number(iframe.dataset.scroll || 0));
       const doc = iframe.contentDocument;
+      attachReaderEditor(iframe, "article");
       doc.addEventListener("click", (event) => {
         const link = event.target.closest("a,button");
-        if (!link) return;
+        if (!link || link.closest("[data-reader-ui]")) return;
         if (link.dataset.sourceLink !== undefined) return;
         event.preventDefault();
         if (link.dataset.articleId) { selectedArticle = link.dataset.articleId; articleRoute = "detail"; renderArticles(); }
@@ -1207,7 +1210,8 @@
     });
     holder.append(iframe); canvas.append(holder); preview.append(toolbar, canvas);
     if (!draftArticle) form.replaceChildren(createElement("h2", {}, "下書きから削除した記事"), createElement("p", {}, "反映済みの内容を確認できます。次のデモ反映で掲載が終了します。"));
-    root.append(form, preview);
+    const settings=createElement("details",{className:"content-settings"});settings.append(createElement("summary",{},"記事の設定・詳細編集"),form);
+    root.append(preview,settings);
     renderArticlePreview();
     updateRoleControls();
     requestAnimationFrame(fitPreviews);
@@ -1220,6 +1224,7 @@
     iframe.dataset.scroll = iframe.dataset.route === routeKey ? iframe.contentWindow?.scrollY || 0 : 0;
     iframe.dataset.route = routeKey;
     const content = state[articleMode];
+    const guide=$(".article-reader-toolbar strong");if(guide)guide.textContent=articleMode === "draft" && role !== "viewer" && articleRoute === "detail" ? "文章をクリックして編集・画像をクリックして設定" : "読者向けプレビュー（閲覧専用）";
     const doc = source.cloneNode(true);
     applyFields(doc, content);
     $(".leaf-bg", doc)?.remove();
@@ -1256,23 +1261,11 @@
         root.append(card);
       });
     } else if (article && (articleMode === "draft" || article.listed)) {
-      append("h1", article.title || "タイトル未入力");
+      const title=append("h1", article.title);title.dataset.readerField="title";
       taxonomyLinks(article, append("nav", ""));
-      const meta = append("p", `${article.date} / ${article.author}`); meta.className = "meta";
-      const lead = append("p", article.summary); lead.className = "lead";
-      let paragraph = [];
-      const flushParagraph = () => {
-        if (paragraph.length) append("p", paragraph.join("\n"));
-        paragraph = [];
-      };
-      article.body.split("\n").forEach((line) => {
-        if (line.startsWith("## ")) {
-          flushParagraph();
-          append("h2", line.slice(3));
-        } else if (!line.trim()) flushParagraph();
-        else paragraph.push(line);
-      });
-      flushParagraph();
+      const meta = append("p", [article.date,article.author].filter(Boolean).join(" / ")); meta.className = "meta";
+      const lead = append("p", article.summary); lead.className = "lead";lead.dataset.readerField="summary";
+      const body=append("div", "");body.dataset.readerField="body";appendPlainBody(doc,body,article.body);
       appendSourceMedia(doc, root, article);
     } else {
       append("h1", "この記事は反映済み表示に掲載されていません");
@@ -1334,7 +1327,7 @@
     updateTypeOptions("fixed", items);
     const matching = contentModel.search(items, $("#fixed-search").value, $("#fixed-type").value);
     $("#fixed-count").textContent = `${matching.length} / ${items.length}件`;
-    matching.forEach(page => list.append(button(page.title || "無題の固定ページ", () => {selectedPage=page.id;renderFixedPages();}, "article-item")));
+    matching.forEach(page => {const item=button(page.title || "無題の固定ページ", () => {selectedPage=page.id;renderFixedPages();}, "article-item");item.dataset.pageId=page.id;list.append(item);});
     const draftPage = state.draft.pages.find(p => p.id === selectedPage);
     const page = draftPage || clone(state.published.pages.find(p => p.id === selectedPage) || null);
     if (!page) { root.append(createElement("p", {}, "固定ページを追加、または一覧から選択してください。")); return; }
@@ -1350,14 +1343,18 @@
     const label=createElement("label",{className:"listing-option"},"次の反映で掲載する");label.prepend(check);form.append(label);
     if(page.template === "recruit") form.append(button("採用ページの内容を直接編集",()=>switchView("pages")));
     form.append(button("固定ページを削除",async()=>{if(role === "viewer")return;if(!await confirmAction("固定ページを下書きから削除しますか？反映済み表示は次の反映まで残ります。","削除"))return;if(role === "viewer")return;state.draft.pages=state.draft.pages.filter(p=>p.id!==page.id);markDirty();renderFixedPages();}));
-    const preview=createElement("div",{className:"article-form"});
+    const preview=createElement("div",{className:"article-form direct-preview"});
+    preview.append(createElement("p",{className:"direct-guide"},"文章をクリックして編集・画像をクリックして設定"));
     const mode=createElement("select",{id:"fixed-mode","aria-label":"固定ページプレビューの版"});mode.append(createElement("option",{value:"draft"},"編集中"),createElement("option",{value:"published"},"反映済み"));if(!draftPage)mode.value="published";mode.addEventListener("change",renderFixedPreview);
     const frame=createElement("iframe",{id:"fixed-preview",title:"固定ページプレビュー",sandbox:"allow-same-origin allow-popups allow-popups-to-escape-sandbox"});
+    frame.addEventListener("load",()=>attachReaderEditor(frame,"page"));
     if(!draftPage)form.replaceChildren(createElement("h2",{},"下書きから削除した固定ページ"),createElement("p",{},"反映済みの内容を確認できます。次のデモ反映で掲載が終了します。"));
-    preview.append(mode,frame);root.append(form,preview);renderFixedPreview();updateRoleControls();
+    const settings=createElement("details",{className:"content-settings"});settings.append(createElement("summary",{},"ページの設定・詳細編集"),form);
+    preview.append(mode,frame);root.append(preview,settings);renderFixedPreview();updateRoleControls();
   }
   function renderFixedPreview() {
     const iframe=$("#fixed-preview");if(!iframe)return;
+    const guide=$("#fixed-editor .direct-guide");if(guide)guide.textContent=$("#fixed-mode").value === "draft" && role !== "viewer" ? "文章をクリックして編集・画像をクリックして設定" : "反映済み・閲覧専用";
     const content=state[$("#fixed-mode").value];const page=content.pages.find(p=>p.id===selectedPage);
     const doc=source.cloneNode(true);applyFields(doc,content);
     const main=$("main",doc);
@@ -1367,8 +1364,8 @@
       style.textContent="main,footer{position:relative;background:#fff}main h1{font-size:32px;line-height:1.5;border-left:8px solid #ecdd6e;padding-left:20px;overflow-wrap:anywhere}main p{line-height:2;margin:24px 0}@media(max-width:700px){main h1{font-size:25px}main>section{padding:30px 22px 60px!important}}";
       doc.head.append(style);
       main.replaceChildren();const section=doc.createElement("section");section.style.cssText="padding:40px;max-width:900px;margin:auto;overflow-wrap:anywhere";
-      const h=doc.createElement("h1");h.textContent=visible ? page.title : "この固定ページは掲載されていません";section.append(h);
-      if(visible) {appendPlainBody(doc,section,page.body);appendSourceMedia(doc,section,page);}main.append(section);
+      const h=doc.createElement("h1");h.textContent=visible ? page.title : "この固定ページは掲載されていません";if(visible)h.dataset.readerField="title";section.append(h);
+      if(visible) {const body=doc.createElement("div");body.dataset.readerField="body";appendPlainBody(doc,body,page.body);section.append(body);appendSourceMedia(doc,section,page);}main.append(section);
     }
     contentModel.head(doc,content.settings,{title:visible ? page.seoTitle || (page.template === "recruit" ? content.settings.title : page.title) : "未掲載の固定ページ",description:visible ? page.seoDescription || (page.template === "recruit" ? content.settings.description : "") : ""});
     iframe.srcdoc="<!doctype html>"+doc.documentElement.outerHTML;
@@ -1378,6 +1375,81 @@
     const template="standard";
     const page={id:crypto.randomUUID(),title:"新しい固定ページ",slug:"page-"+Date.now(),template,body:"",listed:false,seoTitle:"",seoDescription:""};
     state.draft.pages.push(page);selectedPage=page.id;markDirty();renderFixedPages();
+  }
+
+  function attachReaderEditor(iframe,kind) {
+    const doc=iframe.contentDocument;
+    const id=kind === "article" ? selectedArticle : selectedPage;
+    const mode=()=>kind === "article" ? articleMode : $("#fixed-mode")?.value;
+    const collection=kind === "article" ? "articles" : "pages";
+    const item=state.draft[collection].find(entry=>entry.id===id);
+    const editable=()=>role !== "viewer" && mode() === "draft" && state.draft[collection].includes(item) && iframe.contentDocument === doc;
+    if(!item || !editable() || (kind === "article" && articleRoute !== "detail"))return;
+    const style=doc.createElement("style");style.textContent=`
+      [data-reader-field][contenteditable]{outline-offset:5px;white-space:pre-wrap;overflow-wrap:anywhere;min-height:1.6em;cursor:text}
+      [data-reader-field][contenteditable]:hover{outline:2px dashed #82a47c}
+      [data-reader-field][contenteditable]:focus{outline:2px solid #48815a;background:#f8fcf5}
+      [data-reader-field][contenteditable]:empty:before{content:attr(data-placeholder);color:#83937d;pointer-events:none}
+      [data-reader-field="body"]{min-height:120px!important;padding:8px 0}
+      [data-reader-image]{cursor:pointer;outline-offset:3px}[data-reader-image]:hover{outline:2px solid #48815a}
+      [data-reader-ui]{font:13px/1.6 Meiryo,sans-serif!important;background:#f0f6ed;padding:12px;border:1px solid #b8cfaf;border-radius:6px;margin:12px 0}
+      [data-reader-ui] button{font:inherit;background:#fff;border:1px solid #b8cfaf;border-radius:5px;padding:5px 10px;margin-right:8px;color:#264c34;cursor:pointer}
+      [data-reader-ui] label{display:block;font-size:12px;margin:8px 0 4px}[data-reader-ui] input{width:100%;padding:8px;border:1px solid #b8cfaf;background:#fff;box-sizing:border-box}
+    `;doc.head.append(style);
+    const update=()=>{
+      if(kind === "article"){item.updatedAt=new Date().toISOString();renderArticleItems();}
+      else {const entry=$('[data-page-id="'+id+'"]');if(entry)entry.textContent=item.title || "無題の固定ページ";}
+      markDirty();
+      contentModel.head(doc,state.draft.settings,{title:item.seoTitle || item.title,description:item.seoDescription || item.summary || "",type:kind === "article" ? "article" : "website"});
+    };
+    doc.querySelectorAll("[data-reader-field]").forEach(node=>{
+      const key=node.dataset.readerField;
+      node.contentEditable=key === "body" ? "true" : "plaintext-only";
+      node.setAttribute("role","textbox");node.setAttribute("aria-label",{title:"タイトルを直接編集",body:"本文を直接編集",summary:"概要を直接編集"}[key]);node.setAttribute("aria-multiline","true");
+      node.dataset.placeholder={title:"タイトルを入力",body:"ここをクリックして本文を入力",summary:"ここをクリックして概要を入力"}[key];
+      const commit=()=>{
+        if(!editable() || node.dataset.composing)return;
+        const value=key === "body" ? contentModel.editableBody(node) : node.innerText.replace(/\r\n?/g,"\n");
+        if(item[key]===value)return;item[key]=value;
+        const control=$("#"+(kind === "article" ? "article" : "fixed")+"-"+key);if(control)control.value=value;
+        update();
+      };
+      node.addEventListener("focus",()=>{activeReaderEditor={node,commit};});
+      node.addEventListener("input",commit);
+      node.addEventListener("compositionstart",()=>{node.dataset.composing="true";});
+      node.addEventListener("compositionend",()=>{delete node.dataset.composing;commit();});
+      node.addEventListener("blur",()=>{commit();if(activeReaderEditor?.node===node)activeReaderEditor=null;});
+      node.addEventListener("drop",event=>event.preventDefault());
+      node.addEventListener("paste",event=>{
+        event.preventDefault();if(!editable())return;
+        const text=event.clipboardData.getData("text/plain"),selection=doc.getSelection();if(!selection?.rangeCount)return;
+        const range=selection.getRangeAt(0);if(!node.contains(range.commonAncestorContainer))return;
+        range.deleteContents();const plain=doc.createTextNode(text);range.insertNode(plain);range.setStartAfter(plain);range.collapse(true);selection.removeAllRanges();selection.addRange(range);commit();
+      });
+      if(key === "body") {
+        const tools=doc.createElement("div");tools.dataset.readerUi="body-tools";tools.setAttribute("aria-label","本文の追加操作");
+        [["p","段落を追加"],["h2","見出しを追加"]].forEach(([tag,label])=>{
+          const button=doc.createElement("button");button.type="button";button.textContent=label;
+          button.addEventListener("click",()=>{if(!editable())return;const block=doc.createElement(tag);block.append(doc.createElement("br"));node.append(block);node.focus();const range=doc.createRange();range.selectNodeContents(block);range.collapse(true);const selection=doc.getSelection();selection.removeAllRanges();selection.addRange(range);commit();block.scrollIntoView({block:"nearest"});});tools.append(button);
+        });node.before(tools);
+      }
+    });
+    doc.querySelectorAll("[data-reader-image]").forEach(img=>img.addEventListener("click",event=>{
+      if(!editable())return;event.preventDefault();
+      doc.querySelectorAll('[data-reader-ui="image"]').forEach(panel=>panel.remove());
+      const index=Number(img.dataset.readerImage),image=item.images?.[index];if(!image)return;
+      const panel=doc.createElement("div");panel.dataset.readerUi="image";
+      [["url","画像のURL"],["alt","画像の説明"]].forEach(([key,label])=>{
+        const title=doc.createElement("label"),input=doc.createElement("input");input.id="reader-image-"+key;title.htmlFor=input.id;title.textContent=label;input.value=image[key] || "";
+        input.addEventListener(key === "url" ? "change" : "input",()=>{
+          if(!editable())return;const value=key === "url" ? contentModel.safeHttp(input.value) : input.value;
+          if(key === "url" && !value){input.setCustomValidity("httpまたはhttpsの画像URLを指定してください。");input.reportValidity();return;}input.setCustomValidity("");image[key]=value;
+          if(key === "url")img.src=value;else img.alt=value;
+          const control=document.getElementById("image-"+item.id+"-"+index+(key === "alt" ? "-alt" : ""));if(control)control.value=value;update();
+        });panel.append(title,input);
+      });
+      const close=doc.createElement("button");close.type="button";close.textContent="閉じる";close.addEventListener("click",()=>panel.remove());panel.append(close);img.after(panel);panel.scrollIntoView({block:"nearest"});
+    }));
   }
 
   function updateTypeOptions(prefix, items) {
@@ -1433,7 +1505,7 @@
     (item.images || []).forEach((image,index)=>{
       const url=contentModel.safeHttp(image.url);if(!url)return;
       const figure=doc.createElement("figure");figure.style.cssText="margin:24px 0";
-      const img=doc.createElement("img");img.src=url;img.alt=image.alt || "";img.loading="lazy";img.referrerPolicy="no-referrer";img.style.cssText="max-width:100%;height:auto;display:block";figure.append(img);
+      const img=doc.createElement("img");img.src=url;img.alt=image.alt || "";img.dataset.readerImage=String(index);img.loading="lazy";img.referrerPolicy="no-referrer";img.style.cssText="max-width:100%;height:auto;display:block";figure.append(img);
       if(index < 6)root.append(figure);else {if(!extraImages){extraImages=doc.createElement("details");const summary=doc.createElement("summary");summary.textContent="残りの画像を表示（"+(item.images.length-6)+"件）";extraImages.append(summary);root.append(extraImages);}extraImages.append(figure);}
     });
     const url=contentModel.safeHttp(item.sourceUrl);
@@ -1579,7 +1651,7 @@
     $("#term-search").addEventListener("input",renderTermList);
     selectedArticle = state.draft.articles[0]?.id || null;
     $("#add-fixed").addEventListener("click", addFixedPage);
-    $("#role-select").addEventListener("change", event => {commitInlineEditors();role=event.target.value;status();updateRoleControls();renderPagePreview();renderFields();if(view === "articles")renderArticles();updateRoleControls();});
+    $("#role-select").addEventListener("change", event => {commitInlineEditors();role=event.target.value;status();updateRoleControls();renderPagePreview();renderFields();if(view === "articles")renderArticles();if(view === "fixed")renderFixedPreview();updateRoleControls();});
     new MutationObserver(updateRoleControls).observe(document.body,{childList:true,subtree:true});
     ["click","beforeinput","input","change"].forEach(type => document.addEventListener(type,guardRole,true));
     groups.forEach((group) => $("#section-select").append(createElement("option", { value: group.id }, group.label)));

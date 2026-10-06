@@ -11,6 +11,20 @@
       content.importedIds=[...new Set(content.importedIds || [])];
       return content;
     },
+    editableBody(root) {
+      const visit=node=>{
+        if(node.nodeType===3)return node.textContent || '';
+        if(node.nodeType!==1 && node!==root)return '';
+        const tag=(node.tagName || '').toUpperCase();
+        if(tag==='BR')return '\n';
+        if(['SCRIPT','STYLE'].includes(tag))return '';
+        const value=Array.from(node.childNodes || []).map(visit).join('');
+        if(/^H[1-6]$/.test(tag))return '\n\n## '+value.replace(/\n+$/,'')+'\n\n';
+        if(['P','DIV','LI','BLOCKQUOTE'].includes(tag) && node!==root)return '\n\n'+value+'\n\n';
+        return value;
+      };
+      return visit(root).replace(/\r\n?/g,'\n').replace(/\n{3,}/g,'\n\n').replace(/^\n+|\n+$/g,'');
+    },
     categories(article) {const names=this.tags(article.categories || article.category);return names.length ? names : ['未分類'];},
     safeHttp(value) {try {const url=new URL(value);return ['https:','http:'].includes(url.protocol) ? url.href : '';}catch{return '';}},
     catalog(content,kind) {
